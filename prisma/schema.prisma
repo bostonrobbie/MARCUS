@@ -1,0 +1,198 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Project {
+  id          Int       @id @default(autoincrement())
+  name        String
+  description String?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  runs        Run[]
+  schedules   Schedule[]
+  kpis        KPI[]
+  memories    Memory[]
+  snapshots   Snapshot[]
+  processRuns ProcessRun[]
+
+  @@map("projects")
+}
+
+model Run {
+  id        Int       @id @default(autoincrement())
+  objective String
+  createdAt DateTime  @default(now()) @map("created_at")
+  status    String
+  projectId Int       @default(1) @map("project_id")
+  project   Project   @relation(fields: [projectId], references: [id])
+  
+  tasks     Task[]
+  artifacts Artifact[]
+  logs      Log[]
+  kpis      KPI[]
+
+  @@map("runs")
+}
+
+model Task {
+  id          Int       @id @default(autoincrement())
+  runId       Int       @map("run_id")
+  run         Run       @relation(fields: [runId], references: [id])
+  dept        String
+  title       String
+  description String
+  riskLevel   String    @map("risk_level")
+  status      String
+  retries     Int       @default(0)
+  payloadJson String?   @map("payload_json")
+  resultJson  String?   @map("result_json")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  approvals    Approval[]
+  artifacts    Artifact[]
+  logs         Log[]
+  processSteps ProcessStep[]
+
+  @@map("tasks")
+}
+
+model Approval {
+  id          Int      @id @default(autoincrement())
+  taskId      Int      @map("task_id")
+  task        Task     @relation(fields: [taskId], references: [id])
+  requestedAt DateTime @default(now()) @map("requested_at")
+  approvedAt  DateTime? @map("approved_at")
+  decision    String   @default("PENDING")
+  notes       String?
+
+  @@map("approvals")
+}
+
+model Artifact {
+  id        Int      @id @default(autoincrement())
+  runId     Int      @map("run_id")
+  run       Run      @relation(fields: [runId], references: [id])
+  taskId    Int      @map("task_id")
+  task      Task     @relation(fields: [taskId], references: [id])
+  path      String
+  type      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("artifacts")
+}
+
+model Log {
+  id        Int      @id @default(autoincrement())
+  runId     Int      @map("run_id")
+  run       Run      @relation(fields: [runId], references: [id])
+  taskId    Int?     @map("task_id")
+  task      Task?    @relation(fields: [taskId], references: [id])
+  ts        DateTime @default(now())
+  level     String
+  message   String
+
+  @@map("logs")
+}
+
+model Schedule {
+  id         Int      @id @default(autoincrement())
+  projectId  Int      @map("project_id")
+  project    Project  @relation(fields: [projectId], references: [id])
+  cadence    String
+  nextRunAt  DateTime @map("next_run_at")
+  status     String   // ACTIVE, PAUSED
+
+  @@map("schedules")
+}
+
+model KPI {
+  id        Int      @id @default(autoincrement())
+  runId     Int      @map("run_id")
+  run       Run      @relation(fields: [runId], references: [id])
+  projectId Int      @map("project_id")
+  project   Project  @relation(fields: [projectId], references: [id])
+  name      String
+  value     Float
+  unit      String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("kpis")
+}
+
+model Memory {
+  id            Int      @id @default(autoincrement())
+  projectId     Int      @map("project_id")
+  project       Project  @relation(fields: [projectId], references: [id])
+  dept          String
+  title         String
+  content       String
+  tags          String?
+  timelineIndex Int      @default(0) @map("timeline_index")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@map("memories")
+}
+
+model Snapshot {
+  id           Int      @id @default(autoincrement())
+  projectId    Int      @map("project_id")
+  project      Project  @relation(fields: [projectId], references: [id])
+  summary      String
+  metadataJson String?  @map("metadata_json")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("snapshots")
+}
+
+model ProcessRun {
+  id           Int       @id @default(autoincrement())
+  processName  String    @map("process_name")
+  projectId    Int       @map("project_id")
+  project      Project   @relation(fields: [projectId], references: [id])
+  status       String    // RUNNING, COMPLETED, FAILED, PAUSED
+  inputsJson   String?   @map("inputs_json")
+  startedAt    DateTime  @default(now()) @map("started_at")
+  finishedAt   DateTime? @map("finished_at")
+  
+  steps        ProcessStep[]
+
+  @@map("process_runs")
+}
+
+model ProcessStep {
+  id           Int        @id @default(autoincrement())
+  processRunId Int        @map("process_run_id")
+  processRun   ProcessRun @relation(fields: [processRunId], references: [id])
+  stepId       String     @map("step_id")
+  status       String     // PENDING, RUNNING, COMPLETED, FAILED
+  taskId       Int?       @map("task_id")
+  task         Task?      @relation(fields: [taskId], references: [id])
+  resultJson   String?    @map("result_json")
+  error        String?
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  @@map("process_steps")
+}
+
+model Job {
+  id          Int      @id @default(autoincrement())
+  type        String   // e.g., 'PROCESS_STEP', 'SCHEDULE_TRIGGER'
+  data        String   // JSON payload
+  status      String   // 'PENDING', 'PROCESSING', 'COMPLETED', 'FAILED'
+  priority    Int      @default(0)
+  result      String?  // JSON result
+  error       String?
+  runId       Int?     // Optional link to a Process Run
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  startedAt   DateTime? @map("started_at")
+  completedAt DateTime? @map("completed_at")
+
+  @@map("jobs")
+  @@index([status, priority])
+}

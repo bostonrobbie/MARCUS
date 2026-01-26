@@ -1,0 +1,33 @@
+name: business_audit_cycle
+objective_template: "High-Functioning Business Audit for Project: {{project_name}}"
+inputs_schema:
+  project_name: string
+steps:
+  - id: company_state
+    dept: Executive
+    action_type: SNAPSHOT
+    prompt_template: "Capturing current state for audit."
+
+  - id: marketing_review
+    dept: CMO
+    action_type: PERFORMANCE_AUDIT
+    prompt_template: "Reviewing marketing and growth performance."
+
+  - id: tech_review
+    dept: CTO
+    action_type: PERFORMANCE_AUDIT
+    prompt_template: "Reviewing technical and operational stability."
+
+  - id: financial_audit
+    dept: CFO
+    action_type: PERFORMANCE_AUDIT
+    prompt_template: "Reviewing project ROI and unit economics."
+
+  - id: board_meeting_summary
+    dept: CEO
+    action_type: EXECUTIVE_SUMMARY
+    prompt_template: "Synthesizing full business audit for the Board (User)."
+
+done_criteria:
+  - artifact_exists: PERFORMANCE_AUDIT.md
+  - artifact_exists: EXECUTIVE_SUMMARY.md

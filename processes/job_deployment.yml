@@ -1,0 +1,88 @@
+name: job_deployment
+objective_template: "Autonomous Job Deployment: {{job_description}}"
+inputs_schema:
+  job_description: string
+  project_name: string
+steps:
+  - id: intake_snapshot
+    dept: Executive
+    action_type: SNAPSHOT
+    prompt_template: "Capturing pre-job state for {{project_name}}."
+
+  - id: universal_routing
+    dept: Executive
+    action_type: ROUTING
+    prompt_template: "{{job_description}}"
+
+  - id: strategic_wisdom
+    dept: Executive
+    action_type: WISDOM_SYNTHESIS
+    prompt_template: "Extracting relevant business wisdom for: {{job_description}}"
+
+  - id: advisory_board
+    dept: Executive
+    action_type: MULTIPLEX
+    prompt_template: |
+      We need to execute the following job for {{project_name}}: {{job_description}}
+      
+      Routing Intent: {{universal_routing.result.intent}}
+      Routing Handler: {{universal_routing.result.handler}}
+      Historical Context: {{strategic_wisdom.result.content}}
+      
+      Synthesize a high-leverage execution plan that follows the Love Equation.
+    multiplex_personas:
+      - name: The Strategist
+        title: "CEO"
+      - name: The Builder
+        title: "CTO"
+      - name: The Rainmaker
+        title: "CMO"
+
+  - id: content_generation
+    dept: Marketing
+    action_type: LLM_TASK
+    risk_level: SAFE
+    prompt_template: |
+      Based on the Strategy: {{advisory_board.result.content}}
+      Execute the "Last Mile" for the job: {{job_description}}
+      Generate the primary asset (e.g., Outreach Script, Proposal, or Spec).
+      Save to DELIVERY/primary_asset.md.
+    expected_artifacts:
+      - DELIVERY/primary_asset.md
+
+  - id: technical_spec
+    dept: Operations
+    action_type: LLM_TASK
+    risk_level: SAFE
+    prompt_template: |
+      Based on the Strategy: {{advisory_board.result.content}}
+      Create a technical implementation spec or automation logic for: {{job_description}}
+      Save to DELIVERY/technical_spec.md.
+    expected_artifacts:
+      - DELIVERY/technical_spec.md
+
+  - id: asset_polish
+    dept: Executive
+    action_type: POLISH
+    prompt_template: "DELIVERY/primary_asset.md"
+
+  - id: exe_summary
+    dept: Executive
+    action_type: EXECUTIVE_SUMMARY
+    prompt_template: "Synthesizing job completion report."
+
+  - id: final_delivery
+    dept: Executive
+    action_type: DELIVERY_PACKET
+    prompt_template: "Aggregating all assets for the owner."
+    expected_artifacts:
+      - DELIVERY/primary_asset.md
+      - DELIVERY/technical_spec.md
+      - WISDOM_AUDIT.md
+      - EXECUTIVE_SUMMARY.md
+
+done_criteria:
+  - artifact_exists: DELIVERY_PACKET/primary_asset.md
+  - artifact_exists: DELIVERY_PACKET/technical_spec.md
+  - artifact_exists: DELIVERY_PACKET/EXECUTIVE_SUMMARY.md
+  - artifact_exists: HUMAN_ACTIONS.md

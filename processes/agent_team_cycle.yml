@@ -1,0 +1,57 @@
+name: agent_team_cycle
+objective_template: "Autonomous Team Unit Cycle for project: {{project_name}}"
+inputs_schema:
+  project_name: string
+steps:
+  - id: business_snapshot
+    dept: CEO
+    action_type: SNAPSHOT
+    risk_level: SAFE
+    prompt_template: "Capturing business rhythm snapshot."
+
+  - id: strategy_audit
+    dept: CEO
+    action_type: WISDOM_SYNTHESIS
+    risk_level: SAFE
+    prompt_template: "Auditing past runs for patterns."
+
+  - id: board_of_advisors
+    dept: CEO
+    action_type: MULTIPLEX
+    risk_level: SAFE
+    prompt_template: "Synthesize the growth strategy for project: {{project_name}} based on history: {{strategy_audit.result.content}}"
+    multiplex_personas:
+      - name: The Grower
+        title: "CMO"
+      - name: The Protector
+        title: "CFO"
+      - name: The Innovator
+        title: "CEO"
+
+  - id: product_landing
+    dept: Product
+    action_type: LLM_TASK
+    risk_level: SAFE
+    prompt_template: "Based on strategy: {{board_of_advisors.result.content}}, create high-converting landing page copy. Save to LANDING_READY/landing_page_copy.md."
+    expected_artifacts:
+      - LANDING_READY/landing_page_copy.md
+
+  - id: post_polish
+    dept: CEO
+    action_type: POLISH
+    risk_level: SAFE
+    prompt_template: "LANDING_READY/landing_page_copy.md"
+
+  - id: human_actions_summary
+    dept: CEO
+    action_type: LLM_TASK
+    risk_level: SAFE
+    prompt_template: |
+      Consolidate all generated items into a central HUMAN_ACTIONS.md.
+      List the top actions for the owner, prioritized by the Love Equation (Low Friction).
+    expected_artifacts:
+      - HUMAN_ACTIONS.md
+
+done_criteria:
+  - artifact_exists: HUMAN_ACTIONS.md
+  - artifact_exists: LANDING_READY/landing_page_copy.md

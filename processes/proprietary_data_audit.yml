@@ -1,0 +1,52 @@
+name: proprietary_data_audit
+objective_template: "Audit proprietary data at {{target_path}} for signals."
+inputs_schema:
+  target_path: string
+steps:
+  - id: ingest_data
+    dept: Operations
+    action_type: DATA_INGESTION
+    risk_level: SAFE
+    prompt_template: "{{target_path}}"
+
+  - id: signal_analysis
+    dept: Analysis Lead
+    action_type: LLM_TASK
+    risk_level: SAFE
+    prompt_template: |
+      Review the Data Ingestion Report: {{ingest_data.result.content}}
+      
+      Identify top 5 potential high-leverage business signals based on the file names and conversation titles.
+      Focus on recurring themes, completed projects, or high-value assets (like 'Trading Project', 'Strategies').
+    expected_artifacts:
+      - SIGNAL_REPORT.md
+
+  - id: strategic_debate
+    dept: CEO
+    action_type: MULTIPLEX
+    risk_level: SAFE
+    prompt_template: |
+      Debate the viability of the signals found: {{signal_analysis.result}}
+      
+      Which of these should we ask permission to execute on immediately?
+    multiplex_personas:
+      - name: The Aggressor
+        title: "CMO"
+      - name: The Conservator
+        title: "CFO"
+
+  - id: permission_request
+    dept: CEO
+    action_type: EXECUTIVE_SUMMARY
+    risk_level: SAFE
+    prompt_template: |
+      Based on the debate: {{strategic_debate.result.content}}
+      
+      Draft a formal PERMISSION_REQUEST.md for the user.
+      List the top 3 opportunities found in their data.
+      Ask for explicit permission to proceed with 'Step 1' for each.
+    expected_artifacts:
+      - PERMISSION_REQUEST.md
+
+done_criteria:
+  - artifact_exists: PERMISSION_REQUEST.md

@@ -1,0 +1,39 @@
+{
+  "name": "ai-company-os",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dashboard": "npx ts-node src/dashboard/server.ts",
+    "build": "tsc",
+    "start": "node dist/index.js start",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@prisma/client": "^7.3.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "axios": "^1.13.2",
+    "commander": "^14.0.2",
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "js-yaml": "^4.1.1",
+    "png-to-ico": "^3.0.1",
+    "sqlite3": "^5.1.7",
+    "technicalindicators": "^3.1.0",
+    "yahoo-finance2": "^3.13.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^25.0.10",
+    "prisma": "^7.3.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}

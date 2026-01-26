@@ -1,0 +1,50 @@
+name: daily_growth_cycle
+objective_template: "Autonomous daily growth cycle for project: {{project_name}}"
+inputs_schema:
+  project_name: string
+  target_audience: string
+steps:
+  - id: ceo_pick_focus
+    dept: CEO
+    action_type: LLM_TASK
+    risk_level: SAFE
+    prompt_template: "Analyze current project status and pick one primary growth focus for today. JSON output only."
+    expected_artifacts:
+      - focus.json
+
+  - id: product_update_offer
+    dept: Product
+    action_type: LLM_TASK
+    risk_level: SAFE
+    prompt_template: "Based on the focus: {{ceo_pick_focus.result.focus}}, update the product offer document. Ensure sections for ICP, Pricing, and CTA exist."
+    expected_artifacts:
+      - OFFER.md
+    quality_gates:
+      - type: MARKDOWN_SECTION
+        target: OFFER.md
+        sections: ["ICP", "Pricing", "CTA"]
+
+  - id: growth_lead_gen
+    dept: Growth
+    action_type: LLM_TASK
+    risk_level: SAFE
+    prompt_template: "Generate a list of 30 leads based on the updated offer. Output a CSV with columns: name, company, email, reason."
+    expected_artifacts:
+      - OUTREACH_LIST.csv
+    quality_gates:
+      - type: CSV_COLUMNS
+        target: OUTREACH_LIST.csv
+        columns: ["name", "company", "email", "reason"]
+
+  - id: ops_checklist
+    dept: Ops
+    action_type: LLM_TASK
+    risk_level: SAFE
+    prompt_template: "Create a maintenance checklist for tomorrow based on today's outputs."
+    expected_artifacts:
+      - OPS_CHECKLIST.md
+
+done_criteria:
+  - artifact_exists: OFFER.md
+  - artifact_exists: OUTREACH_LIST.csv
+  - artifact_exists: OPS_CHECKLIST.md

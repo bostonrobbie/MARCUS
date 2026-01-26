@@ -1,0 +1,44 @@
+
+name: "The Morning Standup"
+objective_template: "Conduct a 24-hour sync of the Digital Corporation. Synthesize progress, audit risks, and scout new signals."
+steps:
+  - id: "executive_sync"
+    dept: "CEO"
+    action_type: "EXECUTIVE_SUMMARY"
+    risk_level: "SAFE"
+    prompt_template: "Summarize the last 24 hours of autonomous activity across all active projects."
+
+  - id: "market_pulse"
+    dept: "Analysis Lead"
+    action_type: "SCOUTING"
+    risk_level: "SAFE"
+    prompt_template: "Identify 3 new market signals or competitive moves that could disrupt our current trajectory."
+
+  - id: "forensic_audit"
+    dept: "CEO"
+    action_type: "DEEP_TRUTH_AUDIT"
+    risk_level: "SAFE"
+    prompt_template: "Perform a Forensic Deep Truth audit on the current Synthesis. Is the business drifting into 'Groupthink'?"
+
+  - id: "adversarial_audit"
+    dept: "Red Team Lead"
+    action_type: "LLM_TASK"
+    risk_level: "SAFE"
+    prompt_template: |
+      Review the Executive Sync and Market Pulse. 
+      Sync: {{executive_sync.result}}
+      Market: {{market_pulse.result}}
+      
+      Your Goal: Find the 3 most dangerous assumptions in this current direction.
+      Be brutal. Protect the business from CEO optimism.
+
+  - id: "daily_brief"
+    dept: "CEO"
+    action_type: "LLM_TASK"
+    risk_level: "SAFE"
+    prompt_template: |
+      Generate the 'Owner Breakfast Brief'. 
+      Combine the Executive Sync, Market Pulse, and Forensic Audit into one high-leverage markdown report.
+      Focus on THE LOVE EQUATION.
+    expected_artifacts:
+      - "DAILY_BRIEF.md"

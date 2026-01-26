@@ -1,0 +1,39 @@
+name: business_plan
+objective_template: "Develop full business plan and execution strategy for: {{objective}}"
+inputs_schema:
+  objective: string
+steps:
+  - id: market_audit
+    dept: Strategy
+    action_type: LLM_TASK
+    risk_level: SAFE
+    prompt_template: "Perform a deep-dive research into the viability of: {{objective}}. Identify 3 competitors and 2 unique leverage points."
+
+  - id: technical_feasibility
+    dept: Operations
+    action_type: LLM_TASK
+    risk_level: SAFE
+    prompt_template: "Based on market research: {{market_audit.result}}, how can we automate the delivery of this project locally? Suggest tools and architecture."
+
+  - id: risk_resistance
+    dept: Strategy
+    action_type: DEEP_TRUTH_AUDIT
+    risk_level: SAFE
+    prompt_template: "Audit the plan developed so far: Market: {{market_audit.result}}, Tech: {{technical_feasibility.result}}. Find the single point of failure."
+
+  - id: financial_roi
+    dept: Finance
+    action_type: LLM_TASK
+    risk_level: SAFE
+    prompt_template: "Calculate the estimated ROI and owner friction for this project. Focus on the LOVE Equation."
+
+  - id: executive_sync
+    dept: Executive
+    action_type: EXECUTIVE_SUMMARY
+    risk_level: SAFE
+    prompt_template: "Synthesize all findings into a final HUMAN_ACTIONS.md for the business owner."
+    expected_artifacts:
+      - HUMAN_ACTIONS.md
+
+done_criteria:
+  - artifact_exists: HUMAN_ACTIONS.md
