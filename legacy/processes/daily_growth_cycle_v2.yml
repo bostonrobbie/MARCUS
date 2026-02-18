@@ -1,0 +1,90 @@
+name: daily_growth_cycle_v2
+objective_template: "Autonomous business growth cycle v2 for project: {{project_name}}"
+inputs_schema:
+  project_name: string
+  target_audience: string
+steps:
+  - id: wisdom_audit
+    dept: CEO
+    action_type: WISDOM_SYNTHESIS
+    risk_level: SAFE
+    prompt_template: "Audit past runs to identify patterns."
+
+  - id: ceo_strategy
+    dept: CEO
+    action_type: LLM_TASK
+    risk_level: SAFE
+    prompt_template: |
+      Past Wisdom: {{wisdom_audit.result.content}}
+      
+      Analyze current project status and pick one primary growth focus for today.
+      Generate a set of 5-10 prioritized human actions with ROI estimates and time required.
+      Output format: JSON with 'focus' and 'human_actions' array.
+    expected_artifacts:
+      - focus.json
+
+  - id: product_landing
+    dept: Product
+    action_type: LLM_TASK
+    risk_level: SAFE
+    prompt_template: "Based on focus: {{ceo_strategy.result.focus}}, create high-converting landing page copy. Save to LANDING_READY/landing_page_copy.md."
+    expected_artifacts:
+      - LANDING_READY/landing_page_copy.md
+    quality_gates:
+      - type: MARKDOWN_SECTION
+        target: LANDING_READY/landing_page_copy.md
+        sections: ["ICP", "Value Prop", "Proof", "Pricing/Plan", "CTA"]
+
+  - id: growth_execution
+    dept: Growth
+    action_type: LLM_TASK
+    risk_level: SAFE
+    prompt_template: |
+      Based on updated offer, generate:
+      1. OUTREACH_READY/leads.csv (min 30 leads with name, company, role, email, reason, segment)
+      2. OUTREACH_READY/message_variants.md (3 variants per segment with subject lines)
+      3. OUTREACH_READY/personalization_notes.csv (lead -> why fit -> personalization hook)
+      4. OUTREACH_READY/followup_schedule.md
+    expected_artifacts:
+      - OUTREACH_READY/leads.csv
+      - OUTREACH_READY/message_variants.md
+      - OUTREACH_READY/personalization_notes.csv
+      - OUTREACH_READY/followup_schedule.md
+    quality_gates:
+      - type: CSV_COLUMNS
+        target: OUTREACH_READY/leads.csv
+        columns: ["name", "company", "role", "email", "reason", "segment"]
+      - type: CSV_MIN_ROWS
+        target: OUTREACH_READY/leads.csv
+        min: 30
+      - type: MARKDOWN_SECTION
+        target: OUTREACH_READY/message_variants.md
+        sections: ["Subject", "Variant"]
+
+  - id: ops_kpis
+    dept: Ops
+    action_type: LLM_TASK
+    risk_level: SAFE
+    prompt_template: "Summarize today's metrics into OPS_READY/daily_kpis.json including leads_count and artifact_count."
+    expected_artifacts:
+      - OPS_READY/daily_kpis.json
+
+  - id: human_actions_summary
+    dept: CEO
+    action_type: LLM_TASK
+    risk_level: SAFE
+    prompt_template: |
+      Consolidate all generated items into a central HUMAN_ACTIONS.md.
+      List the top 5-10 actions for the owner, linked to their respective artifacts.
+      Include: Action, Why, Estimated Time, Files to use.
+    expected_artifacts:
+      - HUMAN_ACTIONS.md
+    quality_gates:
+      - type: MARKDOWN_SECTION
+        target: HUMAN_ACTIONS.md
+        sections: ["Action", "Why", "Time", "Files"]
+
+done_criteria:
+  - artifact_exists: HUMAN_ACTIONS.md
+  - artifact_exists: OUTREACH_READY/leads.csv
+  - artifact_exists: LANDING_READY/landing_page_copy.md

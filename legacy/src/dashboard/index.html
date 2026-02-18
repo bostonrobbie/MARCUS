@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Autonomous Control Room v8</title>
+    <link rel="icon" type="image/png" href="favicon.png" />
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=JetBrains+Mono&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --bg: #05070a;
+            --panel: rgba(22, 27, 34, 0.7);
+            --accent: #79c0ff;
+            --accent-glow: rgba(121, 192, 255, 0.3);
+            --text: #c9d1d9;
+            --thought: #d2a8ff;
+            --success: #3fb950;
+            --warn: #d29922;
+        }
+
+        body {
+            background: var(--bg);
+            background-image:
+                radial-gradient(circle at 20% 20%, rgba(20, 30, 48, 0.5) 0%, transparent 50%),
+                radial-gradient(circle at 80% 80%, rgba(10, 20, 35, 0.5) 0%, transparent 50%);
+            color: var(--text);
+            font-family: 'Outfit', sans-serif;
+            margin: 0;
+            padding: 20px;
+            display: grid;
+            grid-template-columns: 350px 1fr 350px;
+            grid-template-rows: 80px 300px 1fr 300px;
+            /* Added row for Neural Feed */
+            gap: 20px;
+            height: 100vh;
+            box-sizing: border-box;
+            overflow-y: auto;
+            /* Allow scrolling */
+            overflow-x: hidden;
+        }
+
+        /* Glassmorphism */
+        .glass {
+            background: var(--panel);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        }
+
+        header {
+            grid-column: span 3;
+            display: flex;
+            align-items: center;
+            padding: 0 30px;
+            justify-content: space-between;
+        }
+
+        .logo {
+            font-size: 24px;
+            font-weight: 800;
+            letter-spacing: -1px;
+            color: var(--accent);
+        }
+
+        .logo span {
+            color: var(--text);
+            font-weight: 300;
+        }
+
+        .stat-grid {
+            grid-column: 1;
+            grid-row: 2;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            padding: 20px;
+        }
+
+        .stat-box {
+            padding: 20px;
+            text-align: center;
+        }
+
+        .stat-val {
+            font-size: 32px;
+            font-weight: 800;
+            color: var(--accent);
+        }
+
+        .stat-label {
+            font-size: 10px;
+            opacity: 0.6;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        #agent-pods {
+            grid-column: 2;
+            grid-row: 2;
+            display: flex;
+            gap: 20px;
+            padding: 20px;
+            overflow-x: auto;
+            align-items: center;
+        }
+
+        .agent-pod {
+            min-width: 140px;
+            height: 180px;
+            padding: 20px;
+            text-align: center;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+        }
+
+        .agent-pod.active {
+            border-color: var(--accent);
+            box-shadow: 0 0 20px var(--accent-glow);
+            transform: scale(1.05);
+        }
+
+        .agent-avatar {
+            width: 60px;
+            height: 60px;
+            background: #21262d;
+            border-radius: 50%;
+            margin: 0 auto 15px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            border: 2px solid #30363d;
+        }
+
+        .agent-pod.active .agent-avatar {
+            border-color: var(--accent);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                box-shadow: 0 0 0 0 rgba(121, 192, 255, 0.4);
+            }
+
+            70% {
+                box-shadow: 0 0 0 20px rgba(121, 192, 255, 0);
+            }
+
+            100% {
+                box-shadow: 0 0 0 0 rgba(121, 192, 255, 0);
+            }
+        }
+
+        .agent-name {
+            font-weight: 600;
+            font-size: 14px;
+            margin-bottom: 5px;
+        }
+
+        .agent-status {
+            font-size: 10px;
+            opacity: 0.5;
+        }
+
+        .timeline {
+            grid-column: 1;
+            grid-row: 3;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        .monologue {
+            grid-column: 2;
+            grid-row: 3;
+            overflow-y: auto;
+            padding: 30px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        .reports {
+            grid-column: 3;
+            grid-row: 2;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        .red-team {
+            grid-column: 3;
+            grid-row: 3;
+            overflow-y: auto;
+            padding: 20px;
+            border-top: 1px solid rgba(255, 0, 0, 0.2);
+        }
+
+        /* Neural Feed Styles */
+        .neural-feed {
+            grid-column: 1 / span 3;
+            grid-row: 4;
+            padding: 20px;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 14px;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.8);
+            border: 1px solid var(--accent);
+            color: #0f0;
+            box-shadow: inset 0 0 20px rgba(0, 255, 0, 0.1);
+        }
+
+        .neural-msg {
+            margin-bottom: 20px;
+            border-bottom: 1px dashed rgba(0, 255, 0, 0.3);
+            padding-bottom: 10px;
+            white-space: pre-wrap;
+        }
+
+        .report-item {
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 12px;
+            padding: 15px;
+            margin-bottom: 15px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            transition: background 0.2s;
+            cursor: pointer;
+        }
+
+        .report-item:hover {
+            background: rgba(255, 255, 255, 0.08);
+        }
+
+        .report-title {
+            font-weight: 600;
+            font-size: 13px;
+            margin-bottom: 5px;
+        }
+
+        .report-meta {
+            font-size: 10px;
+            opacity: 0.5;
+        }
+
+        h2 {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            opacity: 0.7;
+            margin-bottom: 20px;
+            border-left: 3px solid var(--accent);
+            padding-left: 10px;
+        }
+
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+        }
+
+        .thought-blob {
+            color: var(--thought);
+            margin-bottom: 20px;
+            border-left: 2px solid var(--thought);
+            padding-left: 15px;
+        }
+
+        .intercom-blob {
+            color: var(--accent);
+            margin-bottom: 15px;
+            font-size: 11px;
+            font-family: 'JetBrains Mono', monospace;
+            opacity: 0.8;
+        }
+
+        /* Hardware Panel */
+        .hardware-panel {
+            grid-column: 1;
+            grid-row: 1;
+            position: absolute;
+            top: 100px;
+            left: 20px;
+            width: 310px;
+            padding: 20px;
+            z-index: 100;
+        }
+
+        .hardware-panel h3 {
+            font-size: 12px;
+            margin: 0 0 15px 0;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: var(--accent);
+        }
+
+        .mode-selector {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        .mode-selector button {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: var(--text);
+            padding: 8px;
+            border-radius: 8px;
+            font-size: 10px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .mode-selector button.active {
+            background: var(--accent);
+            color: var(--bg);
+            border-color: var(--accent);
+            box-shadow: 0 0 10px var(--accent-glow);
+        }
+
+        #mode-desc {
+            font-size: 10px;
+            opacity: 0.6;
+            margin: 0;
+        }
+    </style>
+</head>
+
+<body>
+    <header class="glass">
+        <div class="logo" style="display: flex; align-items: center; gap: 10px;">
+            <img src="favicon.png" height="32" style="border-radius: 5px;">
+            <div>SYNAPSE<span> AI</span></div>
+        </div>
+        <div id="kpi-stream" style="display: flex; gap: 20px;"></div>
+        <div style="font-size: 12px; letter-spacing: 1px;"><span style="color:var(--success)">●</span> SYSTEM_READY
+        </div>
+    </header>
+
+    <div class="stat-grid">
+        <div class="stat-box glass">
+            <div class="stat-val" id="total-val">0</div>
+            <div class="stat-label">Cycles</div>
+        </div>
+        <div class="stat-box glass">
+            <div class="stat-val" id="task-val">0</div>
+            <div class="stat-label">Active</div>
+        </div>
+        <div class="stat-box glass" style="grid-column: span 2">
+            <div class="stat-val" id="kpi-val">0</div>
+            <div class="stat-label">KPIs Tracked</div>
+        </div>
+    </div>
+
+    <div id="agent-pods" class="glass">
+        <!-- Dynmaic Agents -->
+    </div>
+
+    <div class="timeline glass">
+        <h2>Global Timeline</h2>
+        <div id="timeline-list"></div>
+    </div>
+
+    <div class="monologue glass">
+        <h2>Inner Monologue</h2>
+        <div id="monologue-list"></div>
+    </div>
+
+    <div class="reports glass">
+        <h2>Latest Deliverables</h2>
+        <div id="report-list"></div>
+    </div>
+
+    <div class="red-team glass">
+        <h2 style="border-left-color: #ff4d4d; color: #ff4d4d;">Red Team Audit (v8)</h2>
+        <div id="audit-list"></div>
+    </div>
+
+    <div class="neural-feed glass">
+        <h2 style="border-left-color: #0f0; color: #0f0;">🔌 Neural Link (Live LLM Feed)</h2>
+        <div id="neural-list">Waiting for stream...</div>
+    </div>
+
+    <!-- Hardware Optimization Panel -->
+    <div class="glass hardware-panel">
+        <h3>⚡ Hardware Optimization</h3>
+        <div class="mode-selector">
+            <button onclick="setHardwareMode('Turbo')" id="btn-Turbo">Turbo</button>
+            <button onclick="setHardwareMode('Balanced')" id="btn-Balanced">Balanced</button>
+            <button onclick="setHardwareMode('Quiet')" id="btn-Quiet">Quiet</button>
+        </div>
+        <div id="mode-desc">Standard performance for daily operation.</div>
+    </div>
+
+    <script>
+        const API = 'http://localhost:3030/api';
+        const ROLES = [
+            { id: 'CEO', icon: '👑' },
+            { id: 'CTO', icon: '⚙️' },
+            { id: 'CMO', icon: '📢' },
+            { id: 'CFO', icon: '💎' },
+            { id: 'Analysis Lead', icon: '🔍' },
+            { id: 'Red Team Lead', icon: '🛡️' },
+            { id: 'Marketing Manager', icon: '📊' },
+            { id: 'Dev Lead', icon: '💻' }
+        ];
+
+        function initAgents() {
+            const container = document.getElementById('agent-pods');
+            container.innerHTML = ROLES.map(r => `
+                <div class="agent-pod glass" id="pod-${r.id.replace(' ', '-')}">
+                    <div class="agent-avatar">${r.icon}</div>
+                    <div class="agent-name">${r.id}</div>
+                    <div class="agent-status">Standing By</div>
+                </div>
+            `).join('');
+        }
+
+        async function loadHardwareStatus() {
+            try {
+                const res = await fetch(`${API}/hardware/status`);
+                const status = await res.json();
+                document.querySelectorAll('.mode-selector button').forEach(b => b.classList.remove('active'));
+                const btn = document.getElementById(`btn-${status.active}`);
+                if (btn) btn.classList.add('active');
+                document.getElementById('mode-desc').innerText = status.details.description;
+            } catch (e) {
+                console.error("Failed to load hardware status:", e);
+            }
+        }
+
+        async function setHardwareMode(mode) {
+            try {
+                await fetch(`${API}/hardware/mode`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode })
+                });
+                await loadHardwareStatus();
+            } catch (e) {
+                console.error("Failed to set hardware mode:", e);
+            }
+        }
+
+        async function poll() {
+            try {
+                const stats = await fetch(`${API}/stats`).then(r => r.json());
+                const active = await fetch(`${API}/active-tasks`).then(r => r.json());
+                const reports = await fetch(`${API}/reports`).then(r => r.json());
+                const timeline = await fetch(`${API}/timeline`).then(r => r.json());
+
+                await loadHardwareStatus(); // Sync hardware status
+
+                // Update Stats
+                document.getElementById('total-val').innerText = stats.total_runs;
+                document.getElementById('task-val').innerText = active.tasks.length;
+                document.getElementById('kpi-val').innerText = stats.total_kpis;
+
+                // Update Agents
+                ROLES.forEach(r => {
+                    const pod = document.getElementById(`pod-${r.id.replace(' ', '-')}`);
+                    const isActive = active.tasks.some(t => t.dept === r.id);
+                    if (isActive) {
+                        pod.classList.add('active');
+                        pod.querySelector('.agent-status').innerText = 'PROCESING...';
+                    } else {
+                        pod.classList.remove('active');
+                        pod.querySelector('.agent-status').innerText = 'IDLE';
+                    }
+                });
+
+                // Update Reports
+                document.getElementById('report-list').innerHTML = reports.reports.map(r => `
+                    <div class="report-item">
+                        <div class="report-title">${r.path}</div>
+                        <div class="report-meta">${r.objective.substring(0, 50)}...</div>
+                    </div>
+                `).join('');
+
+                // Update Timeline & Monologue
+                document.getElementById('timeline-list').innerHTML = timeline.timeline
+                    .filter(e => e.type === 'INTERCOM')
+                    .map(e => `<div class="intercom-blob">${e.content}</div>`)
+                    .join('');
+
+                document.getElementById('monologue-list').innerHTML = timeline.timeline
+                    .filter(e => e.type === 'THOUGHT')
+                    .map(e => `<div class="thought-blob">${e.content}</div>`)
+                    .join('');
+
+                // Update Red Team Audits
+                document.getElementById('audit-list').innerHTML = audits.audits.map(a => `
+                    <div class="intercom-blob" style="color: #ff4d4d; border-bottom: 1px solid rgba(255, 77, 77, 0.1); padding-bottom: 5px; margin-bottom: 10px;">
+                        ${a}
+                    </div>
+                `).join('');
+
+                // Update Neural Feed
+                const feed = await fetch(`${API}/llm-feed`).then(r => r.json());
+                document.getElementById('neural-list').innerHTML = feed.logs.map(log => `
+                    <div class="neural-msg">${log}</div>
+                `).join('');
+
+            } catch (e) { console.error(e); }
+        }
+
+        initAgents();
+        setInterval(poll, 2000);
+        poll();
+    </script>
+</body>
+
+</html>

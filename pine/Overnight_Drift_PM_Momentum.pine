@@ -1,0 +1,100 @@
+//@version=5
+strategy("Overnight Drift [PM Momentum]", overlay=true, initial_capital=100000, default_qty_type=strategy.cash, currency=currency.USD, commission_type=strategy.commission.cash_per_contract, commission_value=2.05, slippage=1, backtest_fill_limits_assumption=1, calc_on_every_tick=true)
+
+// ==========================================
+// STRATEGY 5 (OVERNIGHT) - HARDCODED SETTINGS
+// ==========================================
+// Based on NQ Main Strategy 5 parameters with PM Momentum boost
+
+// Filters
+ov_useTrend  = false
+ov_lenTrend  = 200
+ov_skipThu   = false
+ov_startYear = 2010
+
+// Scaling (Hardcoded to Tier 1 for simplicity)
+ov_qty1      = 1
+ov_qty2      = 1
+ov_qty3      = 2
+
+// Risk Management - Removed (Exit only at market open)
+
+// Time Settings
+ov_entryH    = 18
+ov_entryM    = 05
+ov_exitH     = 09
+ov_exitM     = 30
+
+// ==========================================
+// PM MOMENTUM FILTER (NEW BOOST)
+// ==========================================
+usePmMomentum = input.bool(true, "Use PM Momentum Filter", tooltip="Only enter if 13:00-16:00 session was green")
+
+// ==========================================
+// INDICATORS
+// ==========================================
+// Daily EMA for Trend Filter
+ov_emaDaily = request.security(syminfo.tickerid, "D", ta.ema(close, ov_lenTrend))
+
+// VWAP (for scaling - not used in simple version)
+ov_isNewDay = timeframe.change("1D")
+ov_vwapVal  = ta.vwap(close, ov_isNewDay)
+
+// ==========================================
+// PM MOMENTUM CALCULATION
+// ==========================================
+// Get the open price at 13:00 ET (approximately bar index 78 on 5m chart from 9:30 open)
+// 9:30 to 13:00 = 3.5 hours = 42 bars on 5m
+// We need to capture the 13:00 bar's open price
+var float pm_session_open = na
+nyHour = hour(time, "America/New_York")
+nyMin = minute(time, "America/New_York")
+
+// Capture PM session open at 13:00
+if nyHour == 13 and nyMin == 0
+    pm_session_open := open
+
+// Check if PM session was green (current close > PM open)
+pm_green = usePmMomentum ? (not na(pm_session_open) and close > pm_session_open) : true
+
+// ==========================================
+// FILTER CONDITIONS
+// ==========================================
+ov_inDate = year >= ov_startYear
+
+// Trend Filter
+ov_trendOk = not ov_useTrend or close > ov_emaDaily
+
+// Day of Week Filter (Skip Thursday)
+ov_isThu = dayofweek == dayofweek.thursday
+ov_dayOk = not ov_skipThu or not ov_isThu
+
+// ==========================================
+// ENTRY/EXIT TIMING
+// ==========================================
+// Entry Window: 18:05 ET (±15 mins)
+ov_isEntryTime = nyHour == ov_entryH and nyMin >= ov_entryM and nyMin < (ov_entryM + 15)
+
+// Exit Window: 09:30 ET (±15 mins)
+ov_isExitTime = nyHour == ov_exitH and nyMin >= ov_exitM and nyMin < (ov_exitM + 15)
+
+// ==========================================
+// STRATEGY LOGIC
+// ==========================================
+// Entry
+if ov_inDate and ov_isEntryTime and strategy.opentrades == 0
+    if ov_trendOk and ov_dayOk and pm_green
+        strategy.entry("Overnight Long", strategy.long, qty=ov_qty1, comment="Globex Buy")
+
+// Exit at Market Open
+if ov_isExitTime
+    strategy.close("Overnight Long", comment="Open Sell")
+    strategy.cancel("Bracket")
+
+// ==========================================
+// VISUALS
+// ==========================================
+plot(ov_emaDaily, "Daily EMA 200", color=color.white, linewidth=2)
+plotshape(ov_isEntryTime, "Entry Window", shape.triangleup, location.bottom, color.yellow, size=size.tiny)
+plotshape(ov_isEntryTime and not pm_green, "PM Momentum Block", shape.xcross, location.bottom, color.red, size=size.tiny)
+bgcolor(ov_isEntryTime ? color.new(color.green, 90) : na)

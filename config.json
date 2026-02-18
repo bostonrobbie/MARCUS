@@ -1,0 +1,78 @@
+{
+    "project": {
+        "name": "StrategyPipeline",
+        "version": "1.0.0"
+    },
+    "data": {
+        "search_dirs": [
+            "./data",
+            "./examples"
+        ],
+        "default_symbols": [
+            "SPY",
+            "QQQ",
+            "AAPL",
+            "NQ=F"
+        ],
+        "download_missing": true,
+        "cache_dir": "./cache",
+        "instrument_specs": {
+            "NQ": {
+                "type": "FUTURE",
+                "tick_size": 0.25,
+                "multiplier": 20,
+                "commission": 2.05,
+                "description": "E-mini Nasdaq-100"
+            },
+            "ES": {
+                "type": "FUTURE",
+                "tick_size": 0.25,
+                "multiplier": 50,
+                "commission": 2.05,
+                "description": "E-mini S&P 500"
+            },
+            "MNQ": {
+                "type": "FUTURE",
+                "tick_size": 0.25,
+                "multiplier": 2,
+                "commission": 0.60,
+                "description": "Micro E-mini Nasdaq-100"
+            },
+            "MES": {
+                "type": "FUTURE",
+                "tick_size": 0.25,
+                "multiplier": 5,
+                "commission": 0.60,
+                "description": "Micro E-mini S&P 500"
+            },
+            "SPY": {
+                "type": "EQUITY",
+                "tick_size": 0.01,
+                "multiplier": 1,
+                "commission": 0.005,
+                "description": "SPDR S&P 500 ETF Trust"
+            },
+            "QQQ": {
+                "type": "EQUITY",
+                "tick_size": 0.01,
+                "multiplier": 1,
+                "commission": 0.005,
+                "description": "Invesco QQQ Trust"
+            }
+        }
+    },
+    "backtest": {
+        "initial_capital": 100000.0,
+        "commission": 2.5,
+        "slippage": 0.5,
+        "risk_free_rate": 0.04
+    },
+    "execution": {
+        "mode": "simulation",
+        "paper_trading": false
+    },
+    "optimization": {
+        "save_all_results_db": true,
+        "default_grid_size": 20
+    }
+}

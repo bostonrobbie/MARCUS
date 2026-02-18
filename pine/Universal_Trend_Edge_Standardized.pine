@@ -1,0 +1,163 @@
+//@version=5
+strategy("Universal Trend Edge [NQ] Standardized", 
+     overlay=true, 
+     initial_capital=100000, 
+     default_qty_type=strategy.fixed, 
+     default_qty_value=1, 
+     currency=currency.USD, 
+     commission_type=strategy.commission.cash_per_contract, 
+     commission_value=2.05, 
+     slippage=1, 
+     backtest_fill_limits_assumption=1, 
+     calc_on_every_tick=true)
+
+// ==========================================
+// 1. GLOBAL SETTINGS & DATE RANGE (STANDARD)
+// ==========================================
+grpGlobal = "1. Global Settings"
+startTime = input.time(timestamp("01 Jan 2011 00:00 +0000"), "Backtest Start", group=grpGlobal)
+endTime   = input.time(timestamp("01 Jan 2030 00:00 +0000"), "Backtest End", group=grpGlobal)
+inDate    = time >= startTime and time <= endTime
+
+// Time Gate
+startHour = input.int(10, "Start Trading Hour (ET)", minval=0, maxval=23, group=grpGlobal)
+startMin  = input.int(30, "Start Trading Minute", minval=0, maxval=59, group=grpGlobal)
+endHour   = input.int(15, "End Trading Hour (ET)", minval=0, maxval=23, group=grpGlobal)
+endMin    = input.int(55, "End Trading Minute", minval=0, maxval=59, group=grpGlobal)
+use_eod   = input.bool(true, "Force Close at EOD?", group=grpGlobal)
+
+// ==========================================
+// 2. STRATEGY INPUTS
+// ==========================================
+grpStrat = "2. Strategy Logic"
+entry_mode      = input.string("Close", "Entry Execution Mode", options=["Close", "Intrabar"], group=grpStrat, tooltip="Close: Waits for bar confirmation (Zero Repainting). Intrabar: Aggressive (Risk of Repainting).")
+lookback_hurst  = input.int(250, "Regime Lookback (Efficiency)", minval=50, group=grpStrat)
+threshold_hurst = input.float(0.65, "Efficiency Threshold (Trend)", minval=0.5, step=0.05, group=grpStrat)
+length_band     = input.int(250, "Band Lookback", minval=10, group=grpStrat)
+mult_band       = input.float(1.0, "Band Width (StdDev)", minval=0.5, step=0.25, group=grpStrat)
+
+grpRisk = "3. Risk Management"
+sl_atr_mult     = input.float(2.0, "Stop Loss (ATR Multiplier)", step=0.1, group=grpRisk)
+tp_atr_mult     = input.float(6.0, "Take Profit (ATR Multiplier)", step=0.1, group=grpRisk)
+atr_len         = 14
+
+// ==========================================
+// 3. SCALING & SIZING
+// ==========================================
+grpScale    = "4. Position Sizing & Scaling"
+useScale    = input.bool(true,   "Enable Tiered Scaling?", group=grpScale)
+scaleMethod = input.string("Momentum", "Scaling Method", options=["Momentum", "Low Volatility"], group=grpScale)
+
+// Volatility Scaling
+vol_t3      = input.float(0.05, "Vol Tier 3 (ATR%) <", group=grpScale)
+vol_t2      = input.float(0.10, "Vol Tier 2 (ATR%) <", group=grpScale)
+
+// Momentum Scaling
+mom_len     = input.int(14,     "Momentum Length", group=grpScale)
+mom_t3      = input.float(50,   "Mom Tier 3 (Points) >", group=grpScale)
+mom_t2      = input.float(25,   "Mom Tier 2 (Points) >", group=grpScale)
+
+// ==========================================
+// 4. INDICATORS & CALCULATIONS
+// ==========================================
+// Daily VWAP (Manual Calculation to avoid security lookahead)
+t = time("D")
+start_of_day = (t != t[1])
+var float vwap_sum = 0.0
+var float vol_sum = 0.0
+if start_of_day
+    vwap_sum := 0.0
+    vol_sum := 0.0
+vwap_sum += (hlc3 * volume)
+vol_sum += volume
+daily_vwap = (vol_sum != 0) ? (vwap_sum / vol_sum) : hlc3
+
+// Bands
+band_dev   = ta.stdev(close, length_band)
+upper_band = daily_vwap + (mult_band * band_dev)
+lower_band = daily_vwap - (mult_band * band_dev)
+
+// Regime Filter (Efficiency Ratio) - No Future Leak
+calc_er(len) =>
+    change = math.abs(close - close[len])
+    sum_abs_change = math.sum(math.abs(close - close[1]), len)
+    er = (sum_abs_change != 0) ? (change / sum_abs_change) : 0.5
+    er
+regime_val = calc_er(20)
+
+// Scaling Metrics
+atr = ta.atr(atr_len)
+atrPct = (atr / close) * 100
+momVal = math.abs(close - close[mom_len])
+
+// ==========================================
+// 5. TRADING LOGIC
+// ==========================================
+// Time Gate Logic
+nyHour = hour(time, "America/New_York")
+nyMin  = minute(time, "America/New_York")
+currTime = nyHour * 100 + nyMin
+startTimeVal = startHour * 100 + startMin
+endTimeVal   = endHour * 100 + endMin
+
+in_session = inDate and (currTime >= startTimeVal) and (currTime < endTimeVal)
+
+// Position Sizing
+calcQty() =>
+    int q = 1
+    if useScale
+        if scaleMethod == "Low Volatility"
+            if atrPct < vol_t3
+                q := 3
+            else if atrPct < vol_t2
+                q := 2
+        else if scaleMethod == "Momentum"
+            if momVal > mom_t3
+                q := 3
+            else if momVal > mom_t2
+                q := 2
+    q
+entry_qty = calcQty()
+
+// Core Logic Check
+// NOTE: "Close" mode uses barstate.isconfirmed to preventing repainting.
+is_confirmed = (entry_mode == "Intrabar") or barstate.isconfirmed
+
+long_trigger  = (close > upper_band) and (close > open) and (regime_val > threshold_hurst) and (close > daily_vwap)
+short_trigger = (close < lower_band) and (close < open) and (regime_val > threshold_hurst) and (close < daily_vwap)
+
+// Persistent SL/TP tracking
+var float trade_sl = na
+var float trade_tp = na
+
+if in_session and strategy.position_size == 0 and is_confirmed
+    if long_trigger
+        strategy.entry("Ride_Long", strategy.long, qty=entry_qty)
+        trade_sl := close - (sl_atr_mult * atr)
+        trade_tp := close + (tp_atr_mult * atr)
+    else if short_trigger
+        strategy.entry("Ride_Short", strategy.short, qty=entry_qty)
+        trade_sl := close + (sl_atr_mult * atr)
+        trade_tp := close - (tp_atr_mult * atr)
+
+// ==========================================
+// 6. EXITS & VISUALS
+// ==========================================
+if strategy.position_size > 0
+    strategy.exit("Exit_Long", "Ride_Long", stop=trade_sl, limit=trade_tp)
+if strategy.position_size < 0
+    strategy.exit("Exit_Short", "Ride_Short", stop=trade_sl, limit=trade_tp)
+
+// EOD Force Close (Check time)
+// 16:00 ET is usually the cash close. We force close then.
+if use_eod and ((nyHour >= 16) or (not in_session and strategy.position_size != 0))
+    strategy.close_all(comment="EOD Close")
+
+// Plotting
+plot(daily_vwap, "VWAP", color=color.blue)
+p1 = plot(upper_band, "Upper Band", color=color.green)
+p2 = plot(lower_band, "Lower Band", color=color.red)
+fill(p1, p2, color=color.new(color.gray, 95))
+
+plot(strategy.position_size != 0 ? trade_sl : na, "Stop Loss", color=color.red, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size != 0 ? trade_tp : na, "Take Profit", color=color.green, style=plot.style_linebr, linewidth=2)

@@ -1,0 +1,173 @@
+//@version=5
+strategy("Overnight Drift [Smart + Scaling]", overlay=true, initial_capital=100000, default_qty_type=strategy.cash, currency=currency.USD, commission_type=strategy.commission.cash_per_contract, commission_value=2.05)
+
+// ==========================================
+// ARGUMENTS
+// ==========================================
+grpFilt = "Filters"
+useTrend    = input.bool(false, "Trend Filter (Price > EMA)", group=grpFilt)
+lenTrend    = input.int(200, "Trend EMA Length (Daily Approx)", group=grpFilt)
+skipThu     = input.bool(false, "Skip Thursday Close (Weak)", group=grpFilt)
+
+// Time
+startYear = input.int(2015, "Start Year")
+inDate = year >= startYear
+
+// Risk Management
+grpRisk = "Risk Management"
+slPct     = input.float(2.0, "Stop Loss %", minval=0.1, step=0.1, group=grpRisk)
+tpPct     = input.float(1.5, "Take Profit %", minval=0.1, step=0.1, group=grpRisk)
+useVol    = input.bool(false, "Filter High Volatility", group=grpRisk)
+maxAtrPct = input.float(2.5, "Max ATR % (Daily)", minval=0.5, step=0.1, group=grpRisk)
+
+// ==========================================
+// SCALING INPUTS (ADDED)
+// ==========================================
+grpScale = "Scaling Settings"
+// Fixed Quantity Tiers
+qty_t1 = input.int(1, "Tier 1 Qty (Wait/Risky)", minval=1, group=grpScale)
+qty_t2 = input.int(2, "Tier 2 Qty (Normal)", minval=1, group=grpScale)
+qty_t3 = input.int(3, "Tier 3 Qty (Strong)", minval=1, group=grpScale)
+
+// Method
+scaleMethod = input.string("Low Volatility", "Scaling Method", options=["Low Volatility", "Momentum", "VWAP Proximity"], group=grpScale)
+
+// Thresholds for Tiers
+vol_t3 = input.float(1.0, "Vol Tier 3 (<x%)", group=grpScale) 
+vol_t2 = input.float(2.0, "Vol Tier 2 (<x%)", group=grpScale)
+mom_t3 = input.float(2.5, "Mom Tier 3 (>x)", group=grpScale)
+mom_t2 = input.float(1.5, "Mom Tier 2 (>x)", group=grpScale)
+vwap_t3 = input.float(0.3, "VWAP Tier 3 (<x ATR)", group=grpScale)
+vwap_t2 = input.float(0.6, "VWAP Tier 2 (<x ATR)", group=grpScale)
+
+// ==========================================
+// INDICATORS
+// ==========================================
+// We need a "Daily-like" EMA or a very slow Intraday EMA. 
+// User wants "Market Logic". 
+// A 200-period EMA on 5m is only ~16 hours (less than a day).
+// To verify the "Bull Market" logic from optimization (Price > EMA 2000 implied approx weekly), 
+// let's use a higher timeframe request for robustness.
+emaDaily = request.security(syminfo.tickerid, "D", ta.ema(close, 200))
+
+// For the script, we can just use the intraday approximation or the security.
+// Let's use the security for "Daily Trend" as it's cleaner logic.
+trendOk = not useTrend or close > emaDaily
+
+// Volatility Filter (Daily ATR %)
+dailyAtr   = request.security(syminfo.tickerid, "D", ta.atr(14))
+dailyClose = request.security(syminfo.tickerid, "D", close)
+atrPct     = (dailyAtr / dailyClose) * 100
+volOk      = not useVol or atrPct < maxAtrPct
+
+// SCALING INDICATORS
+// 1. VWAP
+isNewDay = timeframe.change("1D")
+vwapVal  = ta.vwap(close, isNewDay)
+
+// 2. Momentum (Length hardcoded to 250 as per NQ Main or use input?)
+// Using 250 as standard trend proxy
+momVal   = ta.mom(close, 250)
+
+// 3. Scaling Metrics
+distToVWAP = math.abs(close - vwapVal)
+distInATR  = distToVWAP / dailyAtr
+
+// Day of Week
+// dayofweek returns 1=Sunday, 2=Monday... 7=Saturday in Pine (usually).
+// Let's verify: dayofweek.monday = 2.
+// We want to skip Thursday Close (into Friday Open).
+// Thursday is dayofweek.thursday (5).
+isThu = dayofweek == dayofweek.thursday
+dayOk = not skipThu or not isThu
+
+// ==========================================
+// STRATEGY (MOC)
+// ==========================================
+// Enter at 15:55 (Last 5m bar of session usually 15:55-16:00, or check exchange time)
+// Pine strategy executes on CLOSE of bar.
+// If we check time(15, 50), bar closes 15:55. Close enough.
+// Exchange: NQ trades until 17:00 ET but RTH closes 16:00.
+// Liquidity highest at 16:00.
+
+// Define Session Close Logic
+// We want to buy JUST BEFORE close.
+isSessionClose = time(timeframe.period, "1555-1600:1234567") // Check 15:55 EST bar
+// Actually simple time check
+t = time(timeframe.period)
+// Hour/Minute extraction
+h = hour(t, "America/New_York")
+m = minute(t, "America/New_York")
+
+// ==========================================
+// TIME INPUTS
+// ==========================================
+grpTime = "Time Settings"
+entryHour = input.int(18, "Entry Hour (ET)", minval=0, maxval=23, group=grpTime)
+entryMin  = input.int(5,  "Entry Minute (ET)", minval=0, maxval=59, group=grpTime)
+exitHour  = input.int(9,  "Exit Hour (ET)", minval=0, maxval=23, group=grpTime)
+exitMin   = input.int(30, "Exit Minute (ET)", minval=0, maxval=59, group=grpTime)
+
+// Entry Window: Entry Time to Entry Time + 15 mins
+isEntryTime = h == entryHour and m >= entryMin and m < (entryMin + 15)
+
+// Exit Window: Exit Time to Exit Time + 15 mins
+isExitTime = h == exitHour and m >= exitMin and m < (exitMin + 15)
+
+// ==========================================
+// SIZE CALCULATION
+// ==========================================
+// 1. Determine Tier (1, 2, or 3)
+int tier = 1 // Default Risky
+if scaleMethod == "Low Volatility"
+    if atrPct < vol_t3
+        tier := 3
+    else if atrPct < vol_t2
+        tier := 2
+else if scaleMethod == "Momentum"
+    // Long Momentum Logic
+    // Since mom_t3 is input ~2.5, abs(mom) needs to be > 25.
+    if math.abs(momVal) >= mom_t3
+        tier := 3
+    else if math.abs(momVal) >= mom_t2
+        tier := 2
+else if scaleMethod == "VWAP Proximity"
+    if distInATR < vwap_t3
+        tier := 3
+    else if distInATR < vwap_t2
+        tier := 2
+
+// 2. Map Tier to Quantity
+int finalQty = qty_t1
+if tier == 2
+    finalQty := qty_t2
+else if tier == 3
+    finalQty := qty_t3
+
+// Execution
+if inDate and isEntryTime and strategy.opentrades == 0
+    if trendOk and dayOk and volOk
+        strategy.entry("Overnight Long", strategy.long, qty=finalQty, comment="Globex Buy (" + str.tostring(finalQty) + ")")
+        
+        // Calculate SL/TP Prices
+        float slPrice = close * (1 - slPct / 100)
+        float tpPrice = close * (1 + tpPct / 100)
+        strategy.exit("Bracket", "Overnight Long", stop=slPrice, limit=tpPrice, comment_loss="SL Hit", comment_profit="TP Hit")
+
+if isExitTime
+    strategy.close("Overnight Long", comment="Open Sell")
+    strategy.cancel("Bracket") // Cancel any pending brackets if time exit hits
+
+// Debugging
+plotshape(isEntryTime, "Entry Window", shape.triangleup, location.bottom, color.yellow, size=size.tiny)
+plotshape(isEntryTime and not trendOk, "Trend Block", shape.xcross, location.bottom, color.red, size=size.tiny)
+plotshape(isEntryTime and not volOk, "Vol Block", shape.xcross, location.bottom, color.orange, size=size.tiny)
+plot(volOk ? na : atrPct, "Blocked ATR %", color=color.orange, style=plot.style_circles)
+// Plot Size Tier (Qty visible in Data Window and Trade List)
+plot(isEntryTime ? finalQty : na, "Trade Qty", color=color.white, style=plot.style_circles)
+
+// ==========================================
+// VISUALS
+// ==========================================
+plot(emaDaily, "Daily EMA 200", color=color.white, linewidth=2)
+bgcolor(isEntryTime ? color.new(color.green, 90) : na)

@@ -1,0 +1,20 @@
+{
+  "active_mode": "Balanced",
+  "modes": {
+    "Turbo": {
+      "gpu_multiplier": 1.2,
+      "temp_multiplier": 0.5,
+      "description": "Maximum performance for overnight or dedicated high-leverage runs."
+    },
+    "Balanced": {
+      "gpu_multiplier": 1,
+      "temp_multiplier": 1,
+      "description": "Standard performance for daily operation."
+    },
+    "Quiet": {
+      "gpu_multiplier": 0.5,
+      "temp_multiplier": 1.5,
+      "description": "Low resource usage for background operation while the owner is working."
+    }
+  }
+}

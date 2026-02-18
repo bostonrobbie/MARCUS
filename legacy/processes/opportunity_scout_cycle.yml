@@ -1,0 +1,42 @@
+name: opportunity_scout_cycle
+objective_template: "Proactive Opportunity Scouting for Project: {{project_name}}"
+inputs_schema:
+  project_name: string
+steps:
+  - id: market_scout
+    dept: Analysis Lead
+    action_type: SCOUTING
+    prompt_template: "Scouting for new high-leverage business opportunities."
+
+  - id: strategic_validation
+    dept: CFO
+    action_type: MULTIPLEX
+    prompt_template: |
+      Validate the following opportunities discovered by the Scout:
+      {{market_scout.result.opportunities}}
+      
+      Determine the ROI and feasibility of each.
+    multiplex_personas:
+      - name: The Strategist
+        title: "CEO"
+      - name: The Numbers Lead
+        title: "CFO"
+
+  - id: business_proposal
+    dept: Executive
+    action_type: LLM_TASK
+    prompt_template: |
+      Based on the validated opportunities: {{strategic_validation.result.content}}
+      Draft a formal business case for the most promising one.
+      Include market research summary, expected leverage, and 1-click execution plan.
+    expected_artifacts:
+      - BUSINESS_CASE_PROPOSAL.md
+
+  - id: owner_notification
+    dept: CEO
+    action_type: EXECUTIVE_SUMMARY
+    prompt_template: "Presenting new business opportunities to the Board Member."
+
+done_criteria:
+  - artifact_exists: BUSINESS_CASE_PROPOSAL.md
+  - artifact_exists: EXECUTIVE_SUMMARY.md

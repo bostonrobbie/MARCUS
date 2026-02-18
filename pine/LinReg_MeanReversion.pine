@@ -1,0 +1,96 @@
+//@version=5
+strategy("LinReg Mean Reversion [Strategy 5]", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, currency=currency.USD)
+
+// ==========================================
+// CONFIGURATION
+// ==========================================
+grpLinReg = "Strategy Settings"
+lrLength    = input.int(50, "LinReg Length", group=grpLinReg)
+lrWidth     = input.float(2.0, "Channel Width (StdDev)", step=0.1, group=grpLinReg)
+adxThresh   = input.float(30.0, "Max ADX (Trend Filter)", group=grpLinReg)
+slPct       = input.float(1.0, "Stop Loss %", step=0.1, group=grpLinReg)
+useMeanExit = input.bool(true, "Exit at Mean (Basis)?", group=grpLinReg)
+
+// Time Filter
+startTime = input.time(timestamp("01 Jan 2011 00:00 +0000"), "Backtest Start")
+endTime = input.time(timestamp("01 Jan 2030 00:00 +0000"), "Backtest End")
+inDate = time >= startTime and time <= endTime
+
+// ==========================================
+// INDICATORS
+// ==========================================
+// 1. Linear Regression Curve (Basis)
+// ta.linreg(source, length, offset)
+basis = ta.linreg(close, lrLength, 0)
+
+// 2. StdDev Width
+// We use StdDev of Price (Simple) matching Python implementation
+dev = ta.stdev(close, lrLength) * lrWidth
+upper = basis + dev
+lower = basis - dev
+
+// 3. ADX Filter
+[plusDI, minusDI, adxVal] = ta.dmi(14, 14)
+isChop = adxVal < adxThresh
+
+// 4. RSI Filter (Extreme Reversion)
+lenRsi = 14
+rsiVal = ta.rsi(close, lenRsi)
+rsiLong = rsiVal < 30
+rsiShort = rsiVal > 70
+
+// ==========================================
+// LOGIC
+// ==========================================
+// Valid Window? using bar_index usually good to avoid early noise
+isValid = inDate and bar_index > lrLength
+
+// Entry Conditions
+// Long: Crossunder Lower Band & Low ADX & RSI < 30
+longCond = isValid and ta.crossunder(close, lower) and isChop and rsiLong
+// Short: Crossover Upper Band & Low ADX & RSI > 70
+shortCond = isValid and ta.crossover(close, upper) and isChop and rsiShort
+
+// ==========================================
+// EXECUTION
+// ==========================================
+if longCond
+    strategy.entry("Long LinReg", strategy.long, comment="LinReg MR")
+
+if shortCond
+    strategy.entry("Short LinReg", strategy.short, comment="LinReg MR")
+
+// Exits
+// Calculate Dynamic Stop Prices from Entry Price
+if strategy.opentrades > 0
+    entryP = strategy.opentrades.entry_price(strategy.opentrades - 1)
+    
+    // Long Exits
+    if strategy.position_size > 0
+        slPrice = entryP * (1 - slPct/100)
+        // Profit Target: Basis (Re-check basis at current bar)
+        // If we want to exit exactly at basis, using limit order is hard because basis moves.
+        // We use conditional close.
+        if useMeanExit and close >= basis
+            strategy.close("Long LinReg", comment="TP Mean")
+        
+        strategy.exit("Exit Long", "Long LinReg", stop=slPrice)
+
+    // Short Exits
+    if strategy.position_size < 0
+        slPrice = entryP * (1 + slPct/100)
+        if useMeanExit and close <= basis
+            strategy.close("Short LinReg", comment="TP Mean")
+        
+        strategy.exit("Exit Short", "Short LinReg", stop=slPrice)
+
+// ==========================================
+// VISUALS
+// ==========================================
+plot(basis, "Basis", color=color.olive, linewidth=2)
+p1 = plot(upper, "Upper", color=color.blue)
+p2 = plot(lower, "Lower", color=color.blue)
+fill(p1, p2, color=color.new(color.blue, 90))
+
+plotshape(longCond, "Long", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(shortCond, "Short", shape.triangledown, location.abovebar, color.red, size=size.small)

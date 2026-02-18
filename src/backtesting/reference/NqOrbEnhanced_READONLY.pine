@@ -1,0 +1,136 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// READ-ONLY COPY — DO NOT MODIFY
+// Source: C:\Users\User\Desktop\Zero_Human_HQ\Quant_Lab\NqOrbEnhanced.pine
+// Purpose: Marcus reference for NQmain strategy analysis
+// Copied: 2026-02-17
+// ═══════════════════════════════════════════════════════════════════════════
+
+//@version=5
+strategy("NqOrbEnhanced [15m]", overlay=true, calc_on_order_fills=true, currency=currency.USD, initial_capital=100000)
+
+// --- INPUTS ---
+// ORB Params
+orbSession = input.session("0930-0945", "ORB Session")
+tradeSession = input.session("0945-1545", "Trading Window")
+exitTimeStr = input.string("1545", "Hard Exit Time (HHMM)")
+
+// Filters
+emaPeriod = input.int(50, "EMA Filter Period")
+atrPeriod = input.int(14, "ATR Period")
+atrMaxMult = input.float(2.5, "Max Range ATR Multiplier")
+htfPeriod = input.int(100, "HTF SMA (Daily) Period")
+htfPeriod2 = input.int(50, "HTF SMA 2 (Daily) Period")
+useHtf = input.bool(true, "Use HTF Trend Filter")
+useRvol = input.bool(true, "Use RVOL Filter")
+rvolLength = input.int(20, "RVOL Length")
+rvolThresh = input.float(1.5, "RVOL Threshold")
+
+// Risk
+slAtrMult = input.float(2.0, "Initial SL ATR Multiplier")
+tpAtrMult = input.float(4.0, "Initial TP ATR Multiplier (Target)")
+tsAtrMult = input.float(2.0, "Trailing Stop ATR Multiplier")
+useTrailing = input.bool(true, "Use Trailing Stop")
+
+// Sizing
+baseContracts = input.int(1, "Base Contracts")
+maxContracts = input.int(3, "Max Contracts")
+useSizing = input.bool(true, "Dynamic Position Sizing")
+
+// --- INDICATORS ---
+emaVal = ta.ema(close, emaPeriod)
+plot(emaVal, "EMA 50", color=color.blue)
+atrVal = ta.atr(atrPeriod)
+volSma = ta.sma(volume, rvolLength)
+rvol = (volSma > 0) ? (volume / volSma) : 0.0
+
+// HTF (Daily)
+dailyClose = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_on)
+d_sma100 = request.security(syminfo.tickerid, "D", ta.sma(close, htfPeriod)[1], lookahead=barmerge.lookahead_on)
+d_sma50 = request.security(syminfo.tickerid, "D", ta.sma(close, htfPeriod2)[1], lookahead=barmerge.lookahead_on)
+
+// --- ORB LOGIC ---
+isOrbSession = time(timeframe.period, orbSession + ":1234567")
+isTradeSession = time(timeframe.period, tradeSession + ":1234567")
+
+var float orbHigh = na
+var float orbLow = na
+var bool tradedToday = false
+
+isNewDay = ta.change(time("D"))
+if isNewDay
+    orbHigh := na
+    orbLow := na
+    tradedToday := false
+
+if isOrbSession
+    if na(orbHigh)
+        orbHigh := high
+        orbLow := low
+    else
+        orbHigh := math.max(orbHigh, high)
+        orbLow := math.min(orbLow, low)
+
+plot(isTradeSession ? orbHigh : na, "ORB High", color=color.green, style=plot.style_linebr)
+plot(isTradeSession ? orbLow : na, "ORB Low", color=color.red, style=plot.style_linebr)
+
+// --- TRADING LOGIC ---
+rangeSize = orbHigh - orbLow
+rangeOk = rangeSize <= (atrVal * atrMaxMult)
+htfLongOk = not useHtf or (dailyClose > d_sma100)
+htfShortOk = not useHtf or (dailyClose < d_sma100)
+rvolOk = not useRvol or (rvol > rvolThresh)
+
+longCond = isTradeSession and not tradedToday and not na(orbHigh) and close > orbHigh and close > emaVal and htfLongOk and rvolOk and rangeOk
+shortCond = isTradeSession and not tradedToday and not na(orbLow) and close < orbLow and close < emaVal and htfShortOk and rvolOk and rangeOk
+
+calcSize(isLong) =>
+    qty = baseContracts
+    if useSizing
+        if isLong and d_sma50 > d_sma100
+            qty := qty + 1
+        else if not isLong and d_sma50 < d_sma100
+            qty := qty + 1
+        if rvol > 2.0
+            qty := qty + 1
+    math.min(qty, maxContracts)
+
+if longCond and barstate.isconfirmed
+    strategy.entry("Long", strategy.long, qty=calcSize(true))
+    tradedToday := true
+
+if shortCond and barstate.isconfirmed
+    strategy.entry("Short", strategy.short, qty=calcSize(false))
+    tradedToday := true
+
+// --- EXITS ---
+currentHHMM = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
+exitHHMM = 1545
+
+if currentHHMM >= exitHHMM
+    strategy.close_all(comment="Session Close")
+
+var float longSL = na
+var float shortSL = na
+
+if strategy.position_size > 0
+    newSL = high - (atrVal * tsAtrMult)
+    if na(longSL)
+        longSL = strategy.opentrades.entry_price(strategy.opentrades - 1) - (atrVal * slAtrMult)
+    if useTrailing
+        longSL := math.max(longSL, newSL)
+    strategy.exit("Exit Long", "Long", stop=longSL)
+else
+    longSL := na
+
+if strategy.position_size < 0
+    newSL = low + (atrVal * tsAtrMult)
+    if na(shortSL)
+        shortSL = strategy.opentrades.entry_price(strategy.opentrades - 1) + (atrVal * slAtrMult)
+    if useTrailing
+        shortSL := math.min(shortSL, newSL)
+    strategy.exit("Exit Short", "Short", stop=shortSL)
+else
+    shortSL := na
+
+plot(strategy.position_size > 0 ? longSL : na, "Long SL", color=color.red, style=plot.style_cross)
+plot(strategy.position_size < 0 ? shortSL : na, "Short SL", color=color.red, style=plot.style_cross)

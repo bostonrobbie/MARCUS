@@ -1,0 +1,77 @@
+//@version=5
+strategy("5m Strategy Candidates", overlay=true)
+
+// ==========================================
+// CANDIDATE 1: TREND PULLBACK
+// ==========================================
+grpPb = "Trend Pullback Settings"
+usePb       = input.bool(true, "Enable Pullback?", group=grpPb)
+lenTrend    = input.int(50, "Trend EMA", group=grpPb)
+lenPb       = input.int(20, "Pullback EMA", group=grpPb)
+slAtrPb     = input.float(2.0, "SL ATR Mult", group=grpPb)
+tpAtrPb     = input.float(4.0, "TP ATR Mult", group=grpPb)
+
+// Indicators
+emaTrend = ta.ema(close, lenTrend)
+emaPb    = ta.ema(close, lenPb)
+atrVal   = ta.atr(14)
+
+// Logic
+// Long: Uptrend (Close > 50) AND Dip (Close < 20)
+// Entry: Market on Next Bar (Open)
+pbLongSetup = close > emaTrend and close < emaPb
+// Short: Downtrend (Close < 50) AND Rally (Close > 20)
+pbShortSetup = close < emaTrend and close > emaPb
+
+if usePb
+    if pbLongSetup
+        strategy.entry("Long PB", strategy.long, comment="PB Buy")
+    if pbShortSetup
+        strategy.entry("Short PB", strategy.short, comment="PB Sell")
+
+    // Exits (Fixed RR)
+    if strategy.opentrades.entry_id(strategy.opentrades - 1) == "Long PB"
+        entryP = strategy.opentrades.entry_price(strategy.opentrades - 1)
+        strategy.exit("Exit PB", "Long PB", stop=entryP - slAtrPb*atrVal, limit=entryP + tpAtrPb*atrVal)
+
+    if strategy.opentrades.entry_id(strategy.opentrades - 1) == "Short PB"
+        entryP = strategy.opentrades.entry_price(strategy.opentrades - 1)
+        strategy.exit("Exit PB", "Short PB", stop=entryP + slAtrPb*atrVal, limit=entryP - tpAtrPb*atrVal)
+
+// ==========================================
+// CANDIDATE 2: VOLATILITY BREAKOUT (IB)
+// ==========================================
+grpVb = "Vol Breakout Settings"
+useVb       = input.bool(true, "Enable Vol Breakout?", group=grpVb)
+slAtrVb     = input.float(1.5, "SL ATR Mult", group=grpVb)
+tpAtrVb     = input.float(3.0, "TP ATR Mult", group=grpVb)
+
+// Logic: Inside Bar
+// Bar 1 (Mother), Bar 2 (Inside) -> Trade Break of Bar 2
+// Check if previous bar was Inside
+prevHigh = high[1]
+prevLow  = low[1]
+motherHigh = high[2]
+motherLow  = low[2]
+
+isInside = prevHigh < motherHigh and prevLow > motherLow
+
+if useVb and isInside
+    // Stop Orders at High/Low of Inside Bar
+    strategy.entry("Long VB", strategy.long, stop=prevHigh, comment="VB Buy")
+    strategy.entry("Short VB", strategy.short, stop=prevLow, comment="VB Sell")
+
+// Exits
+if strategy.opentrades > 0
+    entryId = strategy.opentrades.entry_id(strategy.opentrades - 1)
+    if entryId == "Long VB"
+        entryP = strategy.opentrades.entry_price(strategy.opentrades - 1)
+        strategy.exit("Exit VB", "Long VB", stop=entryP - slAtrVb*atrVal, limit=entryP + tpAtrVb*atrVal)
+    if entryId == "Short VB"
+        entryP = strategy.opentrades.entry_price(strategy.opentrades - 1)
+        strategy.exit("Exit VB", "Short VB", stop=entryP + slAtrVb*atrVal, limit=entryP - tpAtrVb*atrVal)
+
+// Visuals
+plot(emaTrend, "Trend EMA", color=color.yellow)
+plot(emaPb, "Pullback EMA", color=color.orange)
+barcolor(isInside ? color.white : na)

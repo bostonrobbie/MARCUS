@@ -1,0 +1,830 @@
+//@version=5
+strategy("Triple NQ Variant [Trend + ORB + Short] % Scaling", 
+     overlay=true, 
+     initial_capital=100000, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=33, 
+     currency=currency.USD, 
+     commission_type=strategy.commission.cash_per_contract, 
+     commission_value=2.05,
+     slippage=1,
+     backtest_fill_limits_assumption=1,
+     calc_on_every_tick=false,
+     calc_on_order_fills=true)
+
+// ==========================================
+// 1. STRATEGY TOGGLES & GLOBAL SETTINGS
+// ==========================================
+grpGlobal = "1. Global Settings & Toggles"
+// Strategy Enable/Disable
+enable_s1    = input.bool(true,  "Enable Strat 1 (Trend NQ)", group=grpGlobal)
+enable_s2    = input.bool(true,  "Enable Strat 2 (Long ORB)", group=grpGlobal)
+enable_s3    = input.bool(true,  "Enable Strat 3 (Simple Short)", group=grpGlobal)
+enable_s4    = input.bool(true,  "Enable Strat 4 (Short ORB)", group=grpGlobal)
+enable_s5    = input.bool(true,  "Enable Strat 5 (Overnight)", group=grpGlobal)
+enable_s6    = input.bool(true,  "Enable Strat 6 (Universal Trend)", group=grpGlobal)
+
+// Date Range
+startTime = input.time(timestamp("31 Dec 2010 19:00 +0000"), "Backtest Start", group=grpGlobal)
+endTime = input.time(timestamp("01 Jan 2030 00:00 +0000"), "Backtest End", group=grpGlobal)
+limitOneTradePerDay = input.bool(false, "Limit to 1 Trade Per Day?", group=grpGlobal)
+inDate = time >= startTime and time <= endTime
+
+// ==========================================
+// 2. SCALING, RISK & MONEY MANAGEMENT
+// ==========================================
+grpPct = "2. Scaling & Position Sizing"
+useLimitEntries = input.bool(true, "Use Limit Entries (Fill at Close)?", group=grpPct, tooltip="If true, uses Limit Orders at Close price.")
+limitOffsetPts  = input.int(4,     "Limit Offset Tolerance (Pts)", minval=0, group=grpPct, tooltip="Willingness to pay up to X points slippage to get filled (Marketable Limit).")
+useLeverage = input.bool(false, "Use Leveraged (% Equity) Scaling?", group=grpPct)
+// Tier 1 = 33%
+pct_t1 = input.float(33.0, "Tier 1 (% Equity)", minval=1.0, maxval=100.0, step=1.0, group=grpPct)
+// Tier 2 = 66%
+pct_t2 = input.float(66.0, "Tier 2 (% Equity)", minval=1.0, maxval=100.0, step=1.0, group=grpPct)
+// Tier 3 = 100%
+pct_t3 = input.float(100.0, "Tier 3 (% Equity)", minval=1.0, maxval=100.0, step=1.0, group=grpPct)
+
+grpRisk = "3. Risk Management & Constraints"
+maxContracts = input.int(15, "Max Contracts Limit", minval=1, group=grpRisk) // CHANGED TO 15 PER USER REQUEST
+useEquityCap = input.bool(false, "Cap Equity used for Scaling?", group=grpRisk)
+equityCapVal = input.float(1000000, "Max Equity to Compound ($)", group=grpRisk)
+
+useDdControl   = input.bool(true, "Enable Drawdown Control Logic?", group=grpRisk)
+// Tier A: Caution
+ddLimitA       = input.float(5.0,  "Tier 1 (Caution) DD %", group=grpRisk)
+ddFactorA      = input.float(0.75, "Tier 1 Reduction (0.75)", group=grpRisk)
+// Tier B: Defense
+ddLimitB       = input.float(10.0, "Tier 2 (Defense) DD %", group=grpRisk)
+ddFactorB      = input.float(0.50, "Tier 2 Reduction (0.50)", group=grpRisk)
+// Tier C: Survival
+ddLimitC       = input.float(15.0, "Tier 3 (Survival) DD %", group=grpRisk)
+ddFactorC      = input.float(0.25, "Tier 3 Reduction (0.25)", group=grpRisk)
+
+// Track High Water Mark
+var float max_equity = 0.0
+// Update on every bar to catch intraday equity peaks
+if strategy.equity > max_equity
+    max_equity := strategy.equity
+
+// Calculate Current Drawdown
+float current_dd_pct = 0.0
+if max_equity > 0
+    current_dd_pct := ((max_equity - strategy.equity) / max_equity) * 100
+
+// ==========================================
+// 3. STRATEGY 1: TREND NQ (LONG)
+// ==========================================
+int entryHour       = 9      // 9:40 AM Entry
+int entryMin        = 40
+int trendExitHour   = 16     // 4:45 PM Exit
+int trendExitMin    = 45
+float trendExitBuffer = 0.0  // Exit Buffer
+// Filters
+bool useMom         = true
+int momLen          = 250
+float momThreshLong = 1.0
+bool useLongAdx     = false
+int adxLen          = 250
+float adxThreshLong = 1.0
+bool useDistATR     = false
+float maxDistATR    = 1.25
+// Scaling (Trend NQ)
+bool l_useScale     = true
+string l_scaleMethod = "Low Volatility"
+float l_vol_t3      = 0.05
+float l_vol_t2      = 0.5
+float l_mom_t3      = 2.5
+float l_mom_t2      = 1.5
+float l_vwap_t3     = 0.3
+float l_vwap_t2     = 0.6
+
+// ==========================================
+// 4. STRATEGY 2: LONG ORB
+// ==========================================
+int orbStartHour    = 9
+int orbStartMin     = 30
+int orbEndHour      = 9
+int orbEndMin       = 45
+// Stop Loss Options
+string slTypeOrb    = "Range Low"
+fixedSLOrb    = 0.75
+// Filters
+bool useGreenRange  = true
+// Entry Mode
+string orbEntryMode = "Close"
+// Time Limit
+int orbCancelHour   = 15
+int orbCancelMin    = 30
+bool use_vwap_exit_orb_long = true
+
+// Scaling (ORB)
+bool o_useScale     = true
+string o_scaleMethod = "Low Volatility"
+float o_vol_t3      = 0.05
+float o_vol_t2      = 0.10
+float o_mom_t3      = 10.0
+float o_mom_t2      = 5.0
+float o_vwap_t3     = 0.3
+float o_vwap_t2     = 0.6
+
+// ==========================================
+// 5. STRATEGY 3: SIMPLE SHORT
+// ==========================================
+int shortStartHour  = 9
+int shortStartMin   = 40
+int shortEndHour    = 15
+int shortEndMin     = 10
+int rsi_len         = 21
+int rsi_thresh      = 25
+float sl_pct_short  = 0.01
+bool use_trail_short = false
+float trail_pct_short = 0.5
+bool use_vwap_exit_short = true
+bool use_vix        = true
+float vix_max       = 20.0
+// Scaling (Short)
+bool s_useScale     = true
+string s_scaleMethod = "Low Volatility"
+float s_vol_t3      = 0.05
+float s_vol_t2      = 0.5
+float s_mom_t3      = 15.0
+float s_mom_t2      = 20.0
+float s_vwap_t3     = 0.3
+float s_vwap_t2     = 0.6
+
+
+// ==========================================
+// 6. STRATEGY 4: SHORT ORB
+// ==========================================
+int so_orbStartHour = 9
+int so_orbStartMin  = 30
+int so_orbEndHour   = 9
+int so_orbEndMin    = 45
+// Stop Loss Options
+string so_slType    = "Fixed %"
+float so_fixedSL    = 0.5
+// Filters
+bool so_useVwapFilter = true
+bool so_useRedRange   = true
+// Entry Mode
+string so_entryMode   = "Close"
+// Time Limit
+int so_cancelHour     = 15
+int so_cancelMin      = 30
+bool use_vwap_exit_orb_short = true
+// Scaling (Short ORB)
+bool so_useScale      = true
+string so_scaleMethod = "Momentum"
+float so_vol_t3       = 0.05
+float so_vol_t2       = 0.10
+float so_mom_t3       = 10.0
+float so_mom_t2       = 25.0
+float so_vwap_t3      = 0.3
+float so_vwap_t2      = 0.6
+
+// ==========================================
+// 7. STRATEGY 5: OVERNIGHT DRIFT
+// ==========================================
+ov_useTrend  = true
+ov_lenTrend  = 200
+ov_skipThu   = false
+ov_startYear = 2010
+ov_qty1      = 1
+ov_qty2      = 1
+ov_qty3      = 2
+ov_scaleMeth = "Low Volatility"
+ov_vol_t3    = 1.0
+ov_vol_t2    = 2.0
+ov_mom_t3    = 2.5
+ov_mom_t2    = 1.5
+ov_vwap_t3   = 0.3
+ov_vwap_t2   = 0.6
+ov_slPct     = 2.0
+ov_tpPct     = 2.0
+ov_useVol    = false
+ov_maxAtrPct = 1.0
+ov_entryH    = 18
+ov_entryM    = 05
+ov_exitH     = 09
+ov_exitM     = 30
+
+// ==========================================
+// 8. STRATEGY 6: UNIVERSAL TREND EDGE
+// ==========================================
+// ==========================================
+// 8. STRATEGY 6: UNIVERSAL TREND EDGE (HARDCODED)
+// ==========================================
+u_startHour     = 9
+u_startMin      = 45
+u_endHour       = 15
+u_endMin        = 55
+u_lookbackHurst = 250
+u_threshHurst   = 0.65
+u_lenBand       = 250
+u_multBand      = 1.0
+u_slAtrMult     = 2.0
+u_tpAtrMult     = 6.0
+u_useScale      = true
+u_scaleMethod   = "Low Volatility"
+u_vol_t3        = 0.1
+u_vol_t2        = 0.25
+u_momLen        = 14
+u_mom_t3        = 50.0
+u_mom_t2        = 25.0
+
+
+// ==========================================
+// 7. INDICATORS & COMMON LOGIC
+// ==========================================
+// Time
+t_val = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
+nyHour = hour(time, "America/New_York")
+nyMin = minute(time, "America/New_York")
+isNewDay = timeframe.change("1D")
+
+// Trading Indicators
+vwapVal = ta.vwap(close, isNewDay)
+atrVal = ta.atr(14)
+rsiVal = ta.rsi(close, rsi_len)
+momVal = ta.mom(close, momLen)
+[plusDI, minusDI, adxVal] = ta.dmi(adxLen, adxLen)
+vixVal = request.security("CBOE:VIX", "D", close[1], lookahead=barmerge.lookahead_on)
+
+// Overnight Specific Indicators
+// FIX: Use [1] with lookahead_on to get YESTERDAY'S confirmed values (Non-Repainting)
+ov_dailyAtr   = request.security(syminfo.tickerid, "D", ta.atr(14)[1], lookahead=barmerge.lookahead_on)
+ov_dailyClose = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_on)
+ov_atrPct     = (ov_dailyAtr / ov_dailyClose) * 100
+// Use Yesterday's Daily EMA 200 for Trend Filter (Stable line for whole day)
+ov_emaDaily   = request.security(syminfo.tickerid, "D", ta.ema(close, ov_lenTrend)[1], lookahead=barmerge.lookahead_on)
+
+// Universal Trend Specific Indicators (Manual VWAP to avoid lookahead)
+var float u_vwapSum = 0.0
+var float u_volSum = 0.0
+if isNewDay
+    u_vwapSum := 0.0
+    u_volSum := 0.0
+u_vwapSum += (hlc3 * volume)
+u_volSum += volume
+u_dailyVwap = (u_volSum != 0) ? (u_vwapSum / u_volSum) : hlc3
+// Bands
+u_bandDev   = ta.stdev(close, u_lenBand)
+u_upperBand = u_dailyVwap + (u_multBand * u_bandDev)
+u_lowerBand = u_dailyVwap - (u_multBand * u_bandDev)
+// Regime (Efficiency Ratio)
+calc_er(len) =>
+    change = math.abs(close - close[len])
+    sum_abs_change = math.sum(math.abs(close - close[1]), len)
+    er = (sum_abs_change != 0) ? (change / sum_abs_change) : 0.5
+    er
+u_regimeVal = calc_er(20)
+
+// Metrics for Logic/Scaling
+distToVWAP = math.abs(close - vwapVal)
+atrPct = (atrVal / close) * 100 // Intraday ATR%
+distInATR = distToVWAP / atrVal // Intraday Dist
+ov_distInATR = distToVWAP / ov_dailyAtr // Overnight Dist (using Daily ATR)
+u_momPoints = math.abs(close - close[u_lenBand]) // For Universal Momentum Scaling logic check (if different from generic momVal)
+
+// ==========================================
+// VISUALS: GLOBAL TRACKERS
+// ==========================================
+var float plotSL = na
+var float plotTP = na
+var float plotEntry = na
+if strategy.position_size == 0
+    plotSL := na
+    plotTP := na
+    plotEntry := na
+else
+    plotEntry := strategy.opentrades.entry_price(strategy.opentrades - 1)
+
+// ... [Skipping Scaling/Calc Logic] ...
+
+
+
+// ==========================================
+// 8. SCALING CALCULATORS (TIER ONLY)
+// ==========================================
+calcTier(use, method, vol_t3, vol_t2, mom_t3, mom_t2, vwap_t3, vwap_t2, isShort, customMom) =>
+    int t = 1
+    if use
+        if method == "Low Volatility"
+            if atrPct < vol_t3
+                t := 3
+            else if atrPct < vol_t2
+                t := 2
+        else if method == "VWAP Proximity"
+            if distInATR < vwap_t3
+                t := 3
+            else if distInATR < vwap_t2
+                t := 2
+        else if method == "Momentum"
+            float mVal = customMom != 0 ? customMom : momVal
+            if isShort // Short uses RSI
+                if rsiVal < mom_t3
+                    t := 3
+                else if rsiVal < mom_t2
+                    t := 2
+            else // Long uses Mom Val (Ratio or Points)
+                // For main strategy it uses Ratio (BaseMom * thresh). For Univ it uses Points (thresh).
+                // Heuristic: If threshold > 5, assume Points logic. If < 5, assume Ratio logic.
+                if mom_t3 > 5.0
+                    if math.abs(mVal) >= mom_t3
+                        t := 3
+                    else if math.abs(mVal) >= mom_t2
+                        t := 2
+                else
+                    float baseMom = 10.0 
+                    if math.abs(mVal) >= baseMom * mom_t3
+                        t := 3
+                    else if math.abs(mVal) >= baseMom * mom_t2
+                        t := 2
+    t
+
+// Overnight Tier Calc
+calcTierOvernight(use, method, vol_t3, vol_t2, mom_t3, mom_t2, vwap_t3, vwap_t2) =>
+    int t = 1
+    if method == "Low Volatility"
+        if ov_atrPct < vol_t3
+            t := 3
+        else if ov_atrPct < vol_t2
+            t := 2
+    else if method == "VWAP Proximity"
+        if ov_distInATR < vwap_t3
+            t := 3
+        else if ov_distInATR < vwap_t2
+            t := 2
+    else if method == "Momentum"
+        if math.abs(momVal) >= mom_t3
+            t := 3
+        else if math.abs(momVal) >= mom_t2
+            t := 2
+    t
+
+// Calculate Overnight Tier/Qty
+tierOvernight = calcTierOvernight(true, ov_scaleMeth, ov_vol_t3, ov_vol_t2, ov_mom_t3, ov_mom_t2, ov_vwap_t3, ov_vwap_t2)
+int qtyOvernight = ov_qty1
+if tierOvernight == 2
+    qtyOvernight := ov_qty2
+else if tierOvernight == 3
+    qtyOvernight := ov_qty3
+
+// Calculate Tier for each (Existing)
+// Calculate Tier for each (Existing)
+// Calculate Tier for each (Existing)
+tierLongTrend  = calcTier(l_useScale, l_scaleMethod, l_vol_t3, l_vol_t2, l_mom_t3, l_mom_t2, l_vwap_t3, l_vwap_t2, false, 0)
+tierLongORB    = calcTier(o_useScale, o_scaleMethod, o_vol_t3, o_vol_t2, o_mom_t3, o_mom_t2, o_vwap_t3, o_vwap_t2, false, 0)
+tierShort      = calcTier(s_useScale, s_scaleMethod, s_vol_t3, s_vol_t2, s_mom_t3, s_mom_t2, s_vwap_t3, s_vwap_t2, true, 0)
+tierShortOrb   = calcTier(so_useScale, so_scaleMethod, so_vol_t3, so_vol_t2, so_mom_t3, so_mom_t2, so_vwap_t3, so_vwap_t2, true, 0)
+// Universal Specific Momentum
+u_momVal = ta.mom(close, u_momLen) // Using Strategy 6 specific length input
+tierUniv       = calcTier(u_useScale, u_scaleMethod, u_vol_t3, u_vol_t2, u_mom_t3, u_mom_t2, 0.0, 0.0, false, u_momVal)
+
+calcQtyFromTier(tier) =>
+    float q = 0.0
+    // MODE SELECTION
+    if useLeverage
+        // LEVERAGED MODE (% Equity)
+        float pct = pct_t1 // Default
+        if tier == 2
+            pct := pct_t2
+        else if tier >= 3
+            pct := pct_t3
+        // Determine Equity to use
+        float usedEquity = strategy.equity
+        if useEquityCap and usedEquity > equityCapVal
+            usedEquity := equityCapVal
+        q := math.floor((usedEquity * (pct / 100.0)) / close)
+    else
+        // FIXED CONTRACT MODE
+        if tier == 1
+            q := 1
+        else if tier == 2
+            q := 2
+        else if tier >= 3
+            q := 3
+    
+    // Apply Max Contracts Limit
+    if q > maxContracts
+        q := maxContracts
+    
+    // Apply Enhanced Adaptive Drawdown Control
+    if useDdControl
+        if current_dd_pct > ddLimitC
+            // Survival Mode
+            q := math.floor(q * ddFactorC)
+        else if current_dd_pct > ddLimitB
+            // Defense Mode
+            q := math.floor(q * ddFactorB)
+        else if current_dd_pct > ddLimitA
+            // Caution Mode
+            q := math.floor(q * ddFactorA)
+        // Safety Check
+        if q < 1
+            float baseQty = useLeverage ? math.floor((strategy.equity * 0.33) / close) : 1.0
+            if baseQty >= 1
+                q := 1
+    q
+
+qtyLongTrend = calcQtyFromTier(tierLongTrend)
+qtyLongORB   = calcQtyFromTier(tierLongORB)
+qtyShort     = calcQtyFromTier(tierShort)
+qtyShortOrb  = calcQtyFromTier(tierShortOrb)
+qtyUniv      = calcQtyFromTier(tierUniv)
+
+// HELPER: Generate Trade Info for Labels and Webhooks
+getTradeInfo(name, qty, tier, isLev) =>
+    float tradeVal = qty * close
+    float exactPct = (tradeVal / strategy.equity) * 100
+    string lbl = name + "\nQty: " + str.tostring(qty) + "\n(" + str.tostring(exactPct, "#.1") + "% Eq)"
+    if not isLev
+        lbl := lbl + "\nTier " + str.tostring(tier)
+    string json = "{\"strat\":\"" + name + "\",\"qty\":" + str.tostring(qty) + ",\"tier\":" + str.tostring(tier) + ",\"eq_pct\":" + str.tostring(exactPct, "#.2") + ",\"price\":" + str.tostring(close) + "}"
+    [lbl, json]
+
+drawLabel(txt) =>
+    label.new(bar_index, high, text=txt, style=label.style_label_down, color=color.white, textcolor=color.black, size=size.small)
+
+// ==========================================
+// 9. STRATEGY LOGIC
+// ==========================================
+var int tradesToday = 0
+if isNewDay
+    tradesToday := 0
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    tradesToday += 1
+
+var bool orbLongCond = false
+var bool shortOrbCond = false
+var bool ovLongCond = false
+orbLongCond := false
+shortOrbCond := false
+ovLongCond := false
+
+canTrade = inDate and strategy.position_size == 0 and (not limitOneTradePerDay or tradesToday == 0)
+float limitPriceLong = useLimitEntries ? (close + limitOffsetPts) : na
+float limitPriceShort = useLimitEntries ? (close - limitOffsetPts) : na
+
+// --- A. TREND NQ ---
+isEntryTimeLong = (nyHour == entryHour and nyMin == entryMin)
+longRiskOK = not useDistATR or (distToVWAP <= maxDistATR * atrVal)
+longMomOK = not useMom or (momVal > momThreshLong)
+longAdxOK = not useLongAdx or (adxVal > adxThreshLong and plusDI > minusDI)
+
+// "Primed" condition (Met but not confirmed)
+trendLongPrimed = enable_s1 and canTrade and isEntryTimeLong and (close > vwapVal) and longRiskOK and longMomOK and longAdxOK
+trendLongCond = trendLongPrimed and barstate.isconfirmed
+
+if trendLongCond
+    [valLb, valAl] = getTradeInfo("Trend", qtyLongTrend, tierLongTrend, useLeverage)
+    drawLabel(valLb)
+    strategy.entry("Long Trend", strategy.long, qty=qtyLongTrend, limit=limitPriceLong, comment="Trend (T" + str.tostring(tierLongTrend) + ")", alert_message=valAl)
+
+// --- B. LONG ORB ---
+var float orbRangeHigh = 0.0
+var float orbRangeLow = 0.0
+var float orbRangeOpen = 0.0
+var float orbRangeClose = 0.0
+var bool orbRangeFormed = false
+if isNewDay
+    orbRangeHigh := 0.0
+    orbRangeLow := 999999.0
+    orbRangeOpen := 0.0
+    orbRangeClose := 0.0
+    orbRangeFormed := false
+orbStart = orbStartHour * 100 + orbStartMin
+orbEnd = orbEndHour * 100 + orbEndMin
+if t_val == orbStart
+    orbRangeOpen := open
+if t_val >= orbStart and t_val < orbEnd
+    if high > orbRangeHigh
+        orbRangeHigh := high
+    if low < orbRangeLow
+        orbRangeLow := low
+if t_val == orbEnd
+    orbRangeClose := close[1]
+if t_val >= orbEnd and not orbRangeFormed and orbRangeHigh > 0
+    orbRangeFormed := true
+orbBreakout = orbEntryMode == "Close" ? orbRangeFormed and close > orbRangeHigh : orbRangeFormed and high > orbRangeHigh
+orbGreenRangeOK = not useGreenRange or (orbRangeClose > orbRangeOpen)
+orbTimeOK = t_val < (orbCancelHour * 100 + orbCancelMin)
+
+orbLongPrimed = enable_s2 and canTrade and orbTimeOK and orbGreenRangeOK and (t_val >= orbEnd) and orbBreakout and (close > vwapVal)
+
+if orbLongPrimed and barstate.isconfirmed
+    [valLb, valAl] = getTradeInfo("L-ORB", qtyLongORB, tierLongORB, useLeverage)
+    if orbEntryMode == "Close"
+        drawLabel(valLb)
+        strategy.entry("Long ORB", strategy.long, qty=qtyLongORB, limit=limitPriceLong, comment="L-ORB (T" + str.tostring(tierLongORB) + ")", alert_message=valAl)
+        orbLongCond := true
+    else
+        drawLabel(valLb)
+        strategy.entry("Long ORB", strategy.long, qty=qtyLongORB, stop=orbRangeHigh, limit=limitPriceLong, comment="L-ORB (T" + str.tostring(tierLongORB) + ")", alert_message=valAl)
+        orbLongCond := true
+
+// --- C. SIMPLE SHORT ---
+shortStartVal = shortStartHour * 100 + shortStartMin
+shortEndVal = shortEndHour * 100 + shortEndMin
+inShortLogic = t_val >= shortStartVal and t_val < shortEndVal and close < vwapVal and rsiVal < rsi_thresh and (not use_vix or vixVal < vix_max)
+
+shortPrimed = enable_s3 and canTrade and inShortLogic
+
+if shortPrimed and barstate.isconfirmed
+    [valLb, valAl] = getTradeInfo("Short", qtyShort, tierShort, useLeverage)
+    drawLabel(valLb)
+    strategy.entry("Short", strategy.short, qty=qtyShort, limit=limitPriceShort, comment="Short (T" + str.tostring(tierShort) + ")", alert_message=valAl)
+
+// --- D. SHORT ORB ---
+var float so_rangeHigh = 0.0
+var float so_rangeLow = 0.0
+var float so_rangeOpen = 0.0
+var float so_rangeClose = 0.0
+var bool so_rangeFormed = false
+if isNewDay
+    so_rangeHigh := 0.0
+    so_rangeLow := 999999.0
+    so_rangeOpen := 0.0
+    so_rangeClose := 0.0
+    so_rangeFormed := false
+so_orbStart = so_orbStartHour * 100 + so_orbStartMin
+so_orbEnd = so_orbEndHour * 100 + so_orbEndMin
+if t_val == so_orbStart
+    so_rangeOpen := open
+if t_val >= so_orbStart and t_val < so_orbEnd
+    if high > so_rangeHigh
+        so_rangeHigh := high
+    if low < so_rangeLow
+        so_rangeLow := low
+if t_val == so_orbEnd
+    so_rangeClose := close[1]
+if t_val >= so_orbEnd and not so_rangeFormed and so_rangeHigh > 0
+    so_rangeFormed := true
+so_breakout = so_entryMode == "Close" ? so_rangeFormed and close < so_rangeLow : so_rangeFormed and low < so_rangeLow
+so_vwapOK = not so_useVwapFilter or (close < vwapVal)
+so_redRangeOK = not so_useRedRange or (so_rangeClose < so_rangeOpen)
+so_timeOK = t_val < (so_cancelHour * 100 + so_cancelMin)
+
+so_Primed = enable_s4 and canTrade and so_timeOK and so_redRangeOK and (t_val >= so_orbEnd) and so_breakout and so_vwapOK
+
+if so_Primed and barstate.isconfirmed
+    [valLb, valAl] = getTradeInfo("S-ORB", qtyShortOrb, tierShortOrb, useLeverage)
+    if so_entryMode == "Close"
+        drawLabel(valLb)
+        strategy.entry("Short ORB", strategy.short, qty=qtyShortOrb, limit=limitPriceShort, comment="S-ORB (T" + str.tostring(tierShortOrb) + ")", alert_message=valAl)
+        shortOrbCond := true
+    else
+        drawLabel(valLb)
+        strategy.entry("Short ORB", strategy.short, qty=qtyShortOrb, stop=so_rangeLow, limit=limitPriceShort, comment="S-ORB (T" + str.tostring(tierShortOrb) + ")", alert_message=valAl)
+        shortOrbCond := true
+
+// --- E. OVERNIGHT DRIFT ---
+ov_inDate   = year >= ov_startYear
+ovEntryTime = (nyHour == ov_entryH and nyMin == ov_entryM)
+ov_trendOk = not ov_useTrend or close > ov_emaDaily
+ov_dayOk   = not ov_skipThu or dayofweek != dayofweek.thursday
+ov_volOk   = not ov_useVol or ov_atrPct < ov_maxAtrPct
+
+ov_Primed = enable_s5 and canTrade and ovEntryTime and ov_inDate and ov_trendOk and ov_dayOk and ov_volOk
+
+if ov_Primed and barstate.isconfirmed
+    string ov_comment = "Drift (T" + str.tostring(tierOvernight) + ")"
+    float slPriceOv = close * (1 - ov_slPct / 100)
+    float tpPriceOv = close * (1 + ov_tpPct / 100)
+    
+    // Update Global Visuals
+    plotSL := slPriceOv
+    plotTP := tpPriceOv
+
+    [ovLb, ovAl] = getTradeInfo("Drift", qtyOvernight, tierOvernight, false)
+    drawLabel(ovLb)
+    strategy.entry("Overnight", strategy.long, qty=qtyOvernight, comment=ov_comment, alert_message=ovAl)
+    strategy.exit("Bracket Ov", "Overnight", stop=slPriceOv, limit=tpPriceOv)
+    ovLongCond := true
+
+// ==========================================
+// 10. STRATEGY 6: UNIVERSAL TREND EDGE
+// ==========================================
+var float u_tradeSL = na
+var float u_tradeTP = na
+u_startVal = u_startHour * 100 + u_startMin
+u_endVal   = u_endHour * 100 + u_endMin
+u_inSession = inDate and (t_val >= u_startVal) and (t_val < u_endVal)
+u_isConfirmed = barstate.isconfirmed // Strict Entry
+
+u_longTrigger  = (close > u_upperBand) and (close > open) and (u_regimeVal > u_threshHurst) and (close > u_dailyVwap)
+u_shortTrigger = (close < u_lowerBand) and (close < open) and (u_regimeVal > u_threshHurst) and (close < u_dailyVwap)
+
+u_LongPrimed  = enable_s6 and canTrade and u_inSession and u_longTrigger
+u_ShortPrimed = enable_s6 and canTrade and u_inSession and u_shortTrigger
+
+if barstate.isconfirmed
+    if u_LongPrimed
+        [uLb, uAl] = getTradeInfo("Univ-L", qtyUniv, tierUniv, false)
+        drawLabel(uLb)
+        strategy.entry("Univ Long", strategy.long, qty=qtyUniv, comment="Univ-L (T" + str.tostring(tierUniv) + ")", alert_message=uAl)
+        u_tradeSL := close - (u_slAtrMult * atrVal)
+        u_tradeTP := close + (u_tpAtrMult * atrVal)
+    else if u_ShortPrimed
+        [uLb, uAl] = getTradeInfo("Univ-S", qtyUniv, tierUniv, false)
+        drawLabel(uLb)
+        strategy.entry("Univ Short", strategy.short, qty=qtyUniv, comment="Univ-S (T" + str.tostring(tierUniv) + ")", alert_message=uAl)
+        u_tradeSL := close + (u_slAtrMult * atrVal)
+        u_tradeTP := close - (u_tpAtrMult * atrVal)
+
+// ==========================================
+// 10. EXITS
+// ==========================================
+if strategy.opentrades.entry_id(strategy.opentrades - 1) == "Long Trend"
+    if barstate.isconfirmed and close < (vwapVal - trendExitBuffer)
+        strategy.close("Long Trend", comment="Trend Break")
+
+if strategy.opentrades.entry_id(strategy.opentrades - 1) == "Long ORB"
+    float slP = slTypeOrb == "Fixed %" ? (strategy.opentrades.entry_price(strategy.opentrades - 1) * (1 - fixedSLOrb/100)) : (orbRangeLow < strategy.opentrades.entry_price(strategy.opentrades - 1) ? orbRangeLow : strategy.opentrades.entry_price(strategy.opentrades - 1) * 0.99)
+    plotSL := slP 
+    strategy.exit("Exit ORB", "Long ORB", stop=slP)
+
+if strategy.opentrades.entry_id(strategy.opentrades - 1) == "Short"
+    float entryP = strategy.opentrades.entry_price(strategy.opentrades - 1)
+    if use_trail_short
+        float trailTicksVal = (entryP * (trail_pct_short / 100)) / syminfo.mintick
+        plotSL := entryP * (1 + sl_pct_short) 
+        strategy.exit("Exit Short", "Short", stop=entryP * (1 + sl_pct_short), trail_points=trailTicksVal, trail_offset=trailTicksVal)
+    else
+        plotSL := entryP * (1 + sl_pct_short) 
+        strategy.exit("Exit Short", "Short", stop=entryP * (1 + sl_pct_short))
+    if use_vwap_exit_short and close > vwapVal
+        strategy.close("Short", comment="VWAP Exit")
+
+if strategy.opentrades.entry_id(strategy.opentrades - 1) == "Short ORB"
+    float entryP = strategy.opentrades.entry_price(strategy.opentrades - 1)
+    float slPrice = so_slType == "Fixed %" ? (entryP * (1 + so_fixedSL/100)) : (so_rangeHigh > entryP ? so_rangeHigh : entryP * 1.01)
+    plotSL := slPrice 
+    strategy.exit("Exit Short ORB", "Short ORB", stop=slPrice)
+
+if strategy.opentrades.entry_id(strategy.opentrades - 1) == "Overnight"
+    if (nyHour == ov_exitH and nyMin == ov_exitM)
+        strategy.close("Overnight", comment="AM Exit")
+        strategy.cancel("Bracket Ov")
+
+if strategy.opentrades.entry_id(strategy.opentrades - 1) == "Univ Long"
+    strategy.exit("Exit Univ L", "Univ Long", stop=u_tradeSL, limit=u_tradeTP)
+
+if strategy.opentrades.entry_id(strategy.opentrades - 1) == "Univ Short"
+    strategy.exit("Exit Univ S", "Univ Short", stop=u_tradeSL, limit=u_tradeTP)
+
+// EOD FORCE CLOSES
+if (nyHour == trendExitHour and nyMin == trendExitMin) and not (strategy.opentrades.entry_id(strategy.opentrades - 1) == "Overnight")
+    strategy.close_all(comment="EOD")
+if strategy.opentrades.entry_id(strategy.opentrades - 1) == "Short ORB" and t_val >= 1555
+    strategy.close("Short ORB", comment="EOD ShortOrb")
+if (strategy.opentrades.entry_id(strategy.opentrades - 1) == "Univ Long" or strategy.opentrades.entry_id(strategy.opentrades - 1) == "Univ Short") and t_val >= 1555
+    strategy.close("Univ Long", comment="EOD Univ")
+    strategy.close("Univ Short", comment="EOD Univ")
+
+// ==========================================
+// 11. PLOTS
+// ==========================================
+plot(vwapVal, "VWAP", color.orange, 2)
+plot(orbRangeFormed ? orbRangeHigh : na, "L-ORB High", color.green, 1, plot.style_linebr)
+plot(orbRangeFormed ? orbRangeLow : na, "L-ORB Low", color.red, 1, plot.style_linebr)
+plot(so_rangeFormed ? so_rangeHigh : na, "S-ORB High", color.maroon, 1, plot.style_linebr)
+plot(so_rangeFormed ? so_rangeLow : na, "S-ORB Low", color.navy, 1, plot.style_linebr)
+plotshape(trendLongCond, "Trend Entry", shape.triangleup, location.belowbar, color.blue, size=size.small)
+plotshape(orbLongCond, "ORB Entry", shape.arrowup, location.belowbar, color.lime, size=size.small)
+plotshape(ovLongCond, "Drift Entry", shape.diamond, location.belowbar, color.white, size=size.small)
+plot(strategy.position_size != 0 ? plotSL : na, "Dynamic Stop Loss", color=color.yellow, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size != 0 ? plotTP : na, "Dynamic Take Profit", color=color.purple, style=plot.style_linebr, linewidth=2)
+
+// ==========================================
+// 12. UI DASHBOARD
+// ==========================================
+var table statusTable = table.new(position.top_right, 2, 12, bgcolor=color.black, border_width=1)
+
+// Determine Status
+string statusText = "INACTIVE"
+color statusColor = color.gray
+string detailsText = "Waiting..."
+string slText      = "---"
+string typeText    = "---"
+string qtyText     = "---"
+string eqText      = "---"
+string exitText    = "---"
+
+// Check Primed (Conditions met intra-bar)
+bool isPrimed = trendLongPrimed or orbLongPrimed or shortPrimed or so_Primed or ov_Primed or u_LongPrimed or u_ShortPrimed
+
+// Projected Stop Loss & Qty Calculation (for Primed State)
+float projSL = na
+float projQty = 0.0
+string trigType = "CLOSE" // Default to Close-Only
+
+if trendLongPrimed
+    projSL := close
+    projQty := qtyLongTrend
+    trigType := "WAIT CLOSE"
+    exitText := str.format("{0,number,00}:{1,number,00}", trendExitHour, trendExitMin)
+if orbLongPrimed
+    projSL := orbRangeHigh
+    projQty := qtyLongORB
+    trigType := orbEntryMode == "Close" ? "WAIT CLOSE" : "STOP ORDER"
+    exitText := "Dynamic"
+if shortPrimed
+    projSL := close * (1 + 0.01)
+    projQty := qtyShort
+    trigType := "WAIT CLOSE"
+    exitText := str.format("{0,number,00}:{1,number,00}", shortEndHour, shortEndMin)
+if so_Primed
+    projSL := so_rangeLow
+    projQty := qtyShortOrb
+    trigType := so_entryMode == "Close" ? "WAIT CLOSE" : "STOP ORDER"
+    exitText := "Dynamic"
+if ov_Primed
+    projSL := close * (1 - ov_slPct / 100)
+    projQty := qtyOvernight
+    trigType := "WAIT CLOSE"
+    exitText := str.format("{0,number,00}:{1,number,00}", ov_exitH, ov_exitM)
+if u_LongPrimed
+    projSL := close - (u_slAtrMult * atrVal)
+    projQty := qtyUniv
+    trigType := "WAIT CLOSE"
+    exitText := "Dynamic" // Univ uses ATR targets
+if u_ShortPrimed
+    projSL := close + (u_slAtrMult * atrVal)
+    projQty := qtyUniv
+    trigType := "WAIT CLOSE"
+    exitText := "Dynamic" // Univ uses ATR targets
+
+if strategy.position_size != 0
+    statusText := "ACTIVE"
+    statusColor := color.green
+    float openP = strategy.opentrades.entry_price(strategy.opentrades - 1)
+    float curPnL = (close - openP) * strategy.position_size * 20
+    detailsText := "$" + str.tostring(curPnL, "#.00")
+    
+    // Active SL
+    if not na(plotSL)
+        slText := str.tostring(plotSL, "#.2")
+    else
+        slText := "Dynamic"
+        
+    typeText := "IN TRADE"
+    
+    // Active Qty & Eq
+    qtyText := str.tostring(math.abs(strategy.position_size))
+    float notional = math.abs(strategy.position_size) * close
+    float eqPct = (notional / strategy.equity) * 100
+    eqText := str.tostring(eqPct, "#.1") + "%"
+    
+    // Exit Logic Lookup
+    string entryId = strategy.opentrades.entry_id(strategy.opentrades - 1)
+    if entryId == "Long Trend"
+        exitText := str.format("{0,number,00}:{1,number,00}", trendExitHour, trendExitMin)
+    else if entryId == "Overnight"
+        exitText := str.format("{0,number,00}:{1,number,00}", ov_exitH, ov_exitM)
+    else if entryId == "Short"
+        exitText := str.format("{0,number,00}:{1,number,00}", shortEndHour, shortEndMin)
+    else
+        exitText := "Dynamic"
+    
+else if isPrimed
+    statusText := "PRIMED"
+    statusColor := color.yellow
+    detailsText := "Signal Pending"
+    
+    if not na(projSL)
+        slText := str.tostring(projSL, "#.2")
+    
+    typeText := trigType
+    
+    // Projected Qty
+    qtyText := str.tostring(projQty)
+    float projNotional = projQty * close
+    float projEqPct = (projNotional / strategy.equity) * 100
+    eqText := str.tostring(projEqPct, "#.1") + "%"
+
+// Render
+if barstate.islastconfirmedhistory or barstate.isrealtime
+    // Header
+    table.cell(statusTable, 0, 0, "STATUS", text_color=color.white, bgcolor=color.gray, text_size=size.small)
+    table.cell(statusTable, 0, 1, statusText, text_color=color.black, bgcolor=statusColor, text_size=size.small)
+    
+    // Trigger Type
+    table.cell(statusTable, 0, 2, "TRIGGER", text_color=color.white, bgcolor=color.gray, text_size=size.small)
+    table.cell(statusTable, 0, 3, typeText, text_color=color.white, bgcolor=color.black, text_size=size.small)
+    
+    // SL
+    table.cell(statusTable, 0, 4, "STOP LOSS", text_color=color.white, bgcolor=color.gray, text_size=size.small)
+    table.cell(statusTable, 0, 5, slText, text_color=color.yellow, bgcolor=color.black, text_size=size.small)
+
+    // Qty
+    table.cell(statusTable, 0, 6, "CONTRACTS", text_color=color.white, bgcolor=color.gray, text_size=size.small)
+    table.cell(statusTable, 0, 7, qtyText, text_color=color.teal, bgcolor=color.black, text_size=size.small)
+
+    // Equity %
+    table.cell(statusTable, 0, 8, "EQUITY %", text_color=color.white, bgcolor=color.gray, text_size=size.small)
+    table.cell(statusTable, 0, 9, eqText, text_color=color.teal, bgcolor=color.black, text_size=size.small)
+
+    // Exit Time
+    table.cell(statusTable, 0, 10, "EXIT TIME", text_color=color.white, bgcolor=color.gray, text_size=size.small)
+    table.cell(statusTable, 0, 11, exitText, text_color=color.white, bgcolor=color.black, text_size=size.small)

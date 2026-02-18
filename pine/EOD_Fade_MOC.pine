@@ -1,0 +1,152 @@
+//@version=5
+strategy("EOD Fade / MOC Research [Quant_Lab]", overlay=true, initial_capital=100000, 
+     default_qty_type=strategy.fixed, default_qty_value=1, currency=currency.USD, 
+     commission_type=strategy.commission.cash_per_contract, commission_value=2.05, 
+     slippage=1, backtest_fill_limits_assumption=1, calc_on_every_tick=true)
+
+// ==========================================
+// 1. INPUTS
+// ==========================================
+grpTime = "Time Settings"
+startHour = input.int(13, "Start Hour (ET)", group=grpTime)
+startMin  = input.int(30, "Start Min", group=grpTime)
+endHour   = input.int(15, "Last Entry Hour", group=grpTime)
+endMin    = input.int(45, "Last Entry Min", group=grpTime)
+exitHour  = input.int(15, "Hard Exit Hour", group=grpTime)
+exitMin   = input.int(55, "Hard Exit Min", group=grpTime)
+
+grpLogic = "Strategy Logic"
+stratMode = input.string("VWAP Extension", "Strategy Mode", options=["VWAP Extension", "Afternoon Range"], group=grpLogic)
+vwapMult  = input.float(1.5, "VWAP Ext Multiplier (ATR)", step=0.1, group=grpLogic)
+atrLen    = input.int(14, "ATR Length", group=grpLogic)
+
+grpRange  = "Afternoon Range Settings"
+rngStartH = input.int(12, "Range Start Hour", group=grpRange)
+rngEndH   = input.int(14, "Range End Hour", group=grpRange)
+
+grpRisk   = "Risk Management"
+slPct     = input.float(0.75, "Stop Loss %", step=0.1, group=grpRisk)
+tpPct     = input.float(1.0, "Take Profit %", step=0.1, group=grpRisk)
+useVwapTgt = input.bool(true, "Use VWAP as Target?", group=grpRisk)
+
+// ==========================================
+// 2. INDICATORS
+// ==========================================
+// Time
+t_val = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
+nyHour = hour(time, "America/New_York")
+nyMin = minute(time, "America/New_York")
+isNewDay = timeframe.change("1D")
+
+// Metrics
+vwapVal  = ta.vwap(close, isNewDay)
+atrVal   = ta.atr(atrLen)
+distToVwap = close - vwapVal
+distInAtr  = distToVwap / atrVal
+
+// ==========================================
+// 3. LOGIC
+// ==========================================
+
+// Time Window
+startTime = startHour * 100 + startMin
+endTime   = endHour * 100 + endMin
+inWindow  = t_val >= startTime and t_val <= endTime
+canTrade  = strategy.position_size == 0 and inWindow
+
+// A. VWAP EXTENSION FADE
+float upperBand = vwapVal + (vwapMult * atrVal)
+float lowerBand = vwapVal - (vwapMult * atrVal)
+
+bool goShortExt = close > upperBand
+bool goLongExt  = close < lowerBand
+
+// B. AFTERNOON RANGE (False Breakout)
+// Track Range High/Low between 12:00 and 14:00
+var float rngHigh = 0.0
+var float rngLow  = 0.0
+var bool rngSet   = false
+
+if isNewDay
+    rngHigh := 0.0
+    rngLow  := 0.0
+    rngSet  := false
+
+// Update Range
+if nyHour >= rngStartH and nyHour < rngEndH
+    if rngHigh == 0.0 or high > rngHigh
+        rngHigh := high
+    if rngLow == 0.0 or low < rngLow
+        rngLow := low
+
+// Lock Range at End Hour
+if nyHour == rngEndH and not rngSet
+    rngSet := true
+
+// False Breakout Logic (Only active if Range is Set and we are in Window)
+bool goShortRng = false
+bool goLongRng  = false
+
+if rngSet and inWindow
+    // False Breakout High: Previously High > rngHigh, Now Close < rngHigh
+    // Actually, simplify: If High > rngHigh but Close < rngHigh (Wick Rejection)
+    // Or: Close[1] > rngHigh (Breakout) AND Close < rngHigh (Failure) -> Stronger
+    // Let's use the simple Wick Rejection for now for MOC
+    if high > rngHigh and close < rngHigh
+        goShortRng := true
+    
+    if low < rngLow and close > rngLow
+        goLongRng := true
+
+// ENTRY EXECUTION
+if canTrade
+    if stratMode == "VWAP Extension"
+        if goShortExt
+            strategy.entry("Fade Short", strategy.short, comment="Ext Short")
+        if goLongExt
+            strategy.entry("Fade Long", strategy.long, comment="Ext Long")
+            
+    if stratMode == "Afternoon Range"
+        if goShortRng
+            strategy.entry("Rng Fade Short", strategy.short, comment="False Break High")
+        if goLongRng
+            strategy.entry("Rng Fade Long", strategy.long, comment="False Break Low")
+
+// ==========================================
+// 4. EXITS
+// ==========================================
+float entryPrice = strategy.opentrades.entry_price(strategy.opentrades - 1)
+
+if strategy.position_size > 0
+    float slP = entryPrice * (1 - slPct/100)
+    float tpP = useVwapTgt ? vwapVal : entryPrice * (1 + tpPct/100)
+    // Safety check for VWAP target
+    if useVwapTgt and vwapVal < entryPrice
+        // potentially weird if we bought below VWAP but it drifted lower?
+        // or if we strictly mean reversion, we expect VWAP to be above.
+        // If VWAP is below, just use TP %
+        tpP := entryPrice * (1 + tpPct/100)
+        
+    strategy.exit("Exit Long", stop=slP, limit=tpP)
+
+if strategy.position_size < 0
+    float slP = entryPrice * (1 + slPct/100)
+    float tpP = useVwapTgt ? vwapVal : entryPrice * (1 - tpPct/100)
+    if useVwapTgt and vwapVal > entryPrice
+        tpP := entryPrice * (1 - tpPct/100)
+        
+    strategy.exit("Exit Short", stop=slP, limit=tpP)
+
+// Hard Time Exit (MOC)
+if t_val >= (exitHour * 100 + exitMin)
+    strategy.close_all(comment="MOC Exit")
+
+// ==========================================
+// 5. VISUALS
+// ==========================================
+plot(vwapVal, "VWAP", color.orange)
+plot(stratMode == "VWAP Extension" ? upperBand : na, "+Ext", color.red)
+plot(stratMode == "VWAP Extension" ? lowerBand : na, "-Ext", color.green)
+plot(stratMode == "Afternoon Range" and rngSet ? rngHigh : na, "Rng High", color.gray)
+plot(stratMode == "Afternoon Range" and rngSet ? rngLow : na, "Rng Low", color.gray)
+bgcolor(inWindow ? color.new(color.blue, 90) : na)
