@@ -1,0 +1,142 @@
+//@version=5
+strategy("MARCUS: Power Hour Momentum [A-v3] Tighter Stop", overlay=true, pyramiding=0,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     initial_capital=100000, commission_type=strategy.commission.cash_per_order,
+     commission_value=2.06, slippage=1,
+     calc_on_every_tick=false, calc_on_order_fills=false)
+
+// ============================================================================
+// VARIANT A-v3: TIGHTER ATR STOP (2.0x -> reduced risk per trade)
+// ============================================================================
+// Change from Baseline: SL mult from 1.5x to 2.0x ATR, TP from 3.0x to 4.0x
+//   (maintaining 2:1 R:R ratio but with wider absolute stops)
+//   CORRECTION: Actually testing TIGHTER risk - SL at 1.0x ATR, TP at 2.0x ATR
+// Rationale: Tests whether tighter risk control improves Sharpe by cutting
+//   losers faster, or hurts by getting stopped out on normal noise.
+// ============================================================================
+
+// === INPUTS ===
+string i_rangeSession = input.session("1200-1400", "Consolidation Range Window", group="Range")
+int    i_atrLen       = input.int(14, "ATR Period", minval=5, maxval=50, group="Range")
+float  i_minRangeMult = input.float(0.5, "Min Range Size (ATR mult)", step=0.1, group="Range")
+float  i_maxRangeMult = input.float(3.0, "Max Range Size (ATR mult)", step=0.1, group="Range")
+
+int    i_adxLen       = input.int(14, "ADX Period", minval=5, maxval=30, group="Filters")
+float  i_adxThresh    = input.float(20.0, "ADX Min Threshold", step=1.0, group="Filters")
+int    i_volLen       = input.int(20, "Volume SMA Length", minval=5, group="Filters")
+float  i_volMult      = input.float(1.0, "Volume Filter (mult of avg)", step=0.1, group="Filters")
+bool   i_useEma       = input.bool(true, "Use EMA Trend Filter", group="Filters")
+int    i_emaLen        = input.int(50, "EMA Period", minval=10, maxval=200, group="Filters")
+
+// -- Risk (CHANGED: Tighter stops) --
+float  i_slMult       = input.float(1.0, "Stop Loss ATR Mult", step=0.25, minval=0.5, maxval=5.0, group="Risk")
+float  i_tpMult       = input.float(2.0, "Take Profit ATR Mult", step=0.25, minval=1.0, maxval=8.0, group="Risk")
+bool   i_useTrailing   = input.bool(true, "Use Trailing Stop", group="Risk")
+float  i_tsMult       = input.float(1.0, "Trailing Stop ATR Mult", step=0.25, group="Risk")
+
+string i_tradeSession = input.session("1400-1530", "Trading Entry Window", group="Session")
+int    i_hardExitHHMM = input.int(1540, "Hard Exit Time (HHMM ET)", group="Session")
+
+bool   i_enableLong   = input.bool(true, "Enable Long", group="Direction")
+bool   i_enableShort  = input.bool(true, "Enable Short", group="Direction")
+
+// === CALCULATIONS ===
+int currentHHMM = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
+bool isNewDay = ta.change(time("D")) != 0
+
+float atrVal = ta.atr(i_atrLen)
+float emaVal = ta.ema(close, i_emaLen)
+[diPlus, diMinus, adxVal] = ta.dmi(i_adxLen, i_adxLen)
+float volSma = ta.sma(volume, i_volLen)
+bool volOk = volume >= volSma * i_volMult
+
+bool isRangeSession = not na(time(timeframe.period, i_rangeSession + ":1234567", "America/New_York"))
+bool isTradeSession = not na(time(timeframe.period, i_tradeSession + ":1234567", "America/New_York"))
+
+var float rangeHigh = na
+var float rangeLow  = na
+var bool  tradedToday = false
+
+if isNewDay
+    rangeHigh  := na
+    rangeLow   := na
+    tradedToday := false
+
+if isRangeSession
+    if na(rangeHigh)
+        rangeHigh := high
+        rangeLow  := low
+    else
+        rangeHigh := math.max(rangeHigh, high)
+        rangeLow  := math.min(rangeLow, low)
+
+// === ENTRY LOGIC ===
+float rangeSize = not na(rangeHigh) ? rangeHigh - rangeLow : 0.0
+bool rangeValid = rangeSize >= atrVal * i_minRangeMult and rangeSize <= atrVal * i_maxRangeMult
+
+bool emaLongOk  = not i_useEma or close > emaVal
+bool emaShortOk = not i_useEma or close < emaVal
+bool adxOk = adxVal >= i_adxThresh
+
+bool longBreakout  = close > rangeHigh and barstate.isconfirmed
+bool shortBreakout = close < rangeLow and barstate.isconfirmed
+
+bool longEntry = i_enableLong and isTradeSession and not tradedToday and
+     not na(rangeHigh) and rangeValid and
+     longBreakout and emaLongOk and adxOk and volOk
+
+bool shortEntry = i_enableShort and isTradeSession and not tradedToday and
+     not na(rangeLow) and rangeValid and
+     shortBreakout and emaShortOk and adxOk and volOk
+
+// === EXECUTION ===
+if longEntry
+    strategy.entry("PH Long", strategy.long)
+    tradedToday := true
+
+if shortEntry
+    strategy.entry("PH Short", strategy.short)
+    tradedToday := true
+
+// === EXIT LOGIC ===
+if currentHHMM >= i_hardExitHHMM and strategy.position_size != 0
+    strategy.close_all("Hard Exit")
+
+if strategy.position_size > 0
+    float entryP = strategy.opentrades.entry_price(strategy.opentrades - 1)
+    float sl = entryP - atrVal * i_slMult
+    float tp = entryP + atrVal * i_tpMult
+    if i_useTrailing
+        strategy.exit("Exit Long", "PH Long", trail_offset=math.round(atrVal * i_tsMult / syminfo.mintick), trail_points=math.round(atrVal * i_tsMult / syminfo.mintick))
+    else
+        strategy.exit("Exit Long", "PH Long", stop=sl, limit=tp)
+
+if strategy.position_size < 0
+    float entryP = strategy.opentrades.entry_price(strategy.opentrades - 1)
+    float sl = entryP + atrVal * i_slMult
+    float tp = entryP - atrVal * i_tpMult
+    if i_useTrailing
+        strategy.exit("Exit Short", "PH Short", trail_offset=math.round(atrVal * i_tsMult / syminfo.mintick), trail_points=math.round(atrVal * i_tsMult / syminfo.mintick))
+    else
+        strategy.exit("Exit Short", "PH Short", stop=sl, limit=tp)
+
+// === VISUALIZATION ===
+plot(isRangeSession or isTradeSession ? rangeHigh : na, "Range High", color.green, 2, plot.style_linebr)
+plot(isRangeSession or isTradeSession ? rangeLow : na, "Range Low", color.red, 2, plot.style_linebr)
+plot(i_useEma ? emaVal : na, "EMA", color.blue, 1)
+
+bgcolor(isRangeSession ? color.new(color.gray, 93) : na, title="Range Build")
+bgcolor(isTradeSession ? color.new(color.teal, 93) : na, title="Trade Window")
+
+if barstate.islastconfirmedhistory
+    var table infoT = table.new(position.top_right, 2, 5, bgcolor=color.new(color.gray, 85))
+    table.cell(infoT, 0, 0, "Strategy", text_color=color.white, text_size=size.small)
+    table.cell(infoT, 1, 0, "Power Hour [A-v3] Tight Stop", text_color=color.yellow, text_size=size.small)
+    table.cell(infoT, 0, 1, "CHANGE", text_color=color.white, text_size=size.small)
+    table.cell(infoT, 1, 1, "SL: 1.0x ATR, TP: 2.0x, TS: 1.0x", text_color=color.lime, text_size=size.small)
+    table.cell(infoT, 0, 2, "Regime", text_color=color.white, text_size=size.small)
+    table.cell(infoT, 1, 2, "TRENDING", text_color=color.aqua, text_size=size.small)
+    table.cell(infoT, 0, 3, "Max Trades", text_color=color.white, text_size=size.small)
+    table.cell(infoT, 1, 3, "1/day", text_color=color.white, text_size=size.small)
+    table.cell(infoT, 0, 4, "Timeframe", text_color=color.white, text_size=size.small)
+    table.cell(infoT, 1, 4, "5min", text_color=color.aqua, text_size=size.small)

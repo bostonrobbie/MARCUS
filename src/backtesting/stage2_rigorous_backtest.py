@@ -26,7 +26,7 @@ from typing import Dict, Any, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from .vector_engine import VectorEngine, VectorizedNQORB, VectorizedMA, VectorStrategy
+from .vector_engine import VectorEngine, VectorizedNQORB, VectorizedMA, VectorizedOvernight, VectorStrategy
 from .data import SmartDataHandler
 from .registry import StrategyRegistry
 from .stage1_strategy_research import STRATEGY_ARCHETYPES
@@ -233,6 +233,72 @@ class StrategyMapper:
                 sl_atr_mult=params.get("sl_atr_mult", 2.0),
             )
 
+        elif archetype == "power_hour_momentum":
+            # P0-2: Power hour (14:00-15:30) -- institutional closing flow
+            # Uses entry_time as range start, builds a 15-min consolidation
+            # range, then trades breakouts until exit_time
+            entry = params.get("entry_time", "14:00")
+            h, m = int(entry.split(':')[0]), int(entry.split(':')[1])
+            m += 15
+            if m >= 60:
+                h += 1
+                m -= 60
+            orb_end = f"{h:02d}:{m:02d}"
+            return VectorizedNQORB(
+                orb_start=entry,
+                orb_end=orb_end,
+                ema_filter=params.get("ema_filter", 50),
+                sl_atr_mult=params.get("sl_atr_mult", 1.5),
+                tp_atr_mult=params.get("tp_atr_mult", 3.0),
+                use_adx=True,
+                adx_thresh=params.get("adx_thresh", 20),
+            )
+
+        elif archetype == "first_hour_fade":
+            # P0-2: First hour fade (10:15-11:30) -- mean reversion after
+            # morning overextension. Uses entry_time as range start, builds
+            # a 15-min observation range, then fades moves back toward VWAP.
+            entry = params.get("entry_time", "10:15")
+            h, m = int(entry.split(':')[0]), int(entry.split(':')[1])
+            m += 15
+            if m >= 60:
+                h += 1
+                m -= 60
+            orb_end = f"{h:02d}:{m:02d}"
+            return VectorizedNQORB(
+                orb_start=entry,
+                orb_end=orb_end,
+                ema_filter=params.get("ema_filter", 50),
+                sl_atr_mult=params.get("sl_atr_mult", 1.5),
+                tp_atr_mult=params.get("tp_atr_mult", 3.0),
+            )
+
+        elif archetype == "lunch_range_fade":
+            # P0-2: Lunch range fade (11:30-13:30) -- mean reversion during
+            # midday liquidity trough. Uses range_start/range_end as the
+            # consolidation window, then fades breakouts back to range.
+            return VectorizedNQORB(
+                orb_start=params.get("range_start", "11:30"),
+                orb_end=params.get("range_end", "13:00"),
+                ema_filter=params.get("ema_filter", 50),
+                sl_atr_mult=params.get("sl_atr_mult", 1.0),
+                tp_atr_mult=params.get("tp_atr_mult", 2.0),
+            )
+
+        elif archetype == "overnight":
+            # Overnight session mean-reversion (18:00-09:15 ET)
+            # Uses dedicated VectorizedOvernight engine with cross-midnight
+            # session handling and range-based fade logic.
+            return VectorizedOvernight(
+                session_start=params.get("session_start", "18:00"),
+                session_end=params.get("session_end", "08:00"),
+                range_minutes=params.get("range_minutes", 60),
+                ema_filter=params.get("ema_filter", 50),
+                atr_filter=params.get("atr_filter", 14),
+                sl_atr_mult=params.get("sl_atr_mult", 2.0),
+                tp_atr_mult=params.get("tp_atr_mult", 3.0),
+            )
+
         else:
             logger.warning(f"Unknown archetype '{archetype}', defaulting to ORB")
             return VectorizedNQORB()
@@ -245,6 +311,9 @@ class RigorousBacktester:
     This is the CORE FIX for Critical Bug #1 - the old code was a placeholder
     that always returned 0 trades. This implementation uses the real VectorEngine.
     """
+
+    # P2-2: Suppress redundant "Data loaded" log after first load
+    _data_load_logged = False
 
     def __init__(
         self,
@@ -302,10 +371,13 @@ class RigorousBacktester:
         # Fix Issue #9: Ensure datetime index is properly parsed
         self._fix_datetime_index()
 
-        logger.info(
-            f"Data loaded: {len(self._dataframe)} bars, "
-            f"{self._dataframe.index[0]} to {self._dataframe.index[-1]}"
-        )
+        # P2-2: Only log data load info once (data is cached via shared handler)
+        if not RigorousBacktester._data_load_logged:
+            logger.info(
+                f"Data loaded: {len(self._dataframe)} bars, "
+                f"{self._dataframe.index[0]} to {self._dataframe.index[-1]}"
+            )
+            RigorousBacktester._data_load_logged = True
 
     def _fix_datetime_index(self):
         """
@@ -414,7 +486,7 @@ class RigorousBacktester:
         clean_returns = returns.dropna() if returns is not None else pd.Series([0.0])
 
         # Sharpe ratio (annualized for intraday bars)
-        # For 5-min bars: ~78 bars/day × 252 trading days = 19,656 bars/year
+        # For 5-min bars: ~78 bars/day x 252 trading days = 19,656 bars/year
         # Annualization factor = sqrt(bars_per_year)
         if len(clean_returns) > 1 and clean_returns.std() > 0:
             # Estimate bars per year from data frequency

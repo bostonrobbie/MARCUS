@@ -93,10 +93,10 @@ class MarcusConfig:
 
     # === LLM (for idea generation, optional) ===
     llm_provider: str = os.environ.get("MARCUS_LLM_PROVIDER", "ollama")
-    llm_model: str = os.environ.get("MARCUS_LLM_MODEL", "mistral")
+    llm_model: str = os.environ.get("MARCUS_LLM_MODEL", "qwen2.5:14b")
     llm_base_url: str = os.environ.get("MARCUS_LLM_URL", "http://localhost:11434")
     llm_temperature: float = 0.7
-    llm_enabled: bool = False               # Disabled by default; fallback grid is reliable
+    llm_enabled: bool = os.environ.get("MARCUS_LLM_ENABLED", "true").lower() in ("true", "1", "yes")
 
     # === Statistical Verification Gates ===
     # Sharpe CI gate (S2): reject if 95% CI lower bound crosses zero
@@ -119,8 +119,11 @@ class MarcusConfig:
     max_strategy_indicators: int = 5        # Max technical indicators
 
     # === NQmain Portfolio Fit ===
+    # Triple NQ Variant covers ~22h/day (RTH + overnight Drift).
+    # Time overlap alone is no longer a useful gate -- use complementary_score instead.
     nqmain_pine_path: str = os.path.join(_BASE_DIR, "reference", "NqOrbEnhanced_READONLY.pine")
-    s5_max_nqmain_overlap: float = 0.30     # Max 30% time window overlap with NQmain
+    s5_max_nqmain_overlap: float = 0.30     # Legacy -- S5 now uses complementary_score >= 25
+    s5_min_complementary_score: float = 25  # Min NQmain complementary score (0-100) to pass S5
 
     # === GPU ===
     use_gpu: bool = True

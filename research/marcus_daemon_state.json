@@ -1,0 +1,14 @@
+{
+  "last_cycle_at": "2026-02-22T18:58:37.889354",
+  "last_dashboard_at": "2026-02-22T18:58:40.331769",
+  "last_heartbeat_at": "2026-02-22T18:51:55.721498",
+  "total_cycles": 2935,
+  "total_errors": 0,
+  "started_at": "2026-02-22T09:03:28.028688",
+  "paused": false,
+  "stopped": false,
+  "exploration_mode": "75",
+  "active_objective": "Marcus Research",
+  "active_preset_id": "complement_nqmain",
+  "guide_text": ""
+}

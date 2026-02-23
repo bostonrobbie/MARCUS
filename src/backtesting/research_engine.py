@@ -86,6 +86,18 @@ MARKET_RATIONALE = {
         'a defined range as participation drops. Mean reversion strategies profit from '
         'fading moves to range extremes.'
     ),
+    'overnight': (
+        'Overnight session trading (18:00-09:30 ET) exploits structural inefficiencies '
+        'in the extended-hours NQ futures market. Liquidity thins dramatically after '
+        'the RTH close, creating mean-reversion opportunities as market makers widen '
+        'spreads. Key edges: (1) overnight range compression -- price tends to establish '
+        'a range in the 18:00-22:00 window and mean-revert within it; (2) gap fade -- '
+        'large moves driven by overseas news flow (Asia/Europe open) often partially '
+        'retrace before the US open; (3) pre-market positioning -- institutional order '
+        'flow from 07:00-09:30 creates directional bias. Academic evidence: Cliff et al. '
+        '(2014) show overnight returns account for ~100% of equity premium, and Cooper '
+        'et al. (2008) document distinct overnight vs intraday return dynamics.'
+    ),
 }
 
 
@@ -148,23 +160,42 @@ class AutonomousResearchEngine:
         self._improver = None
         self._shared_data_handler = None  # Cached data handler (loaded once, ~8s save per backtest)
 
+        # P1-2: LLM auto-disable after consecutive failures
+        self._llm_consecutive_failures = 0
+        self._llm_disabled = False
+        self._llm_disabled_logged = False
+
+        # P0-dedup: In-memory set of hashes tested this session (fast dedup)
+        self._tested_this_session: set = set()
+
     # =========================================================================
     # Lazy Component Initialization
     # =========================================================================
 
     def _get_idea_generator(self):
         """Lazy load the strategy idea generator."""
+        # P1-2: Skip LLM if auto-disabled after consecutive failures
+        if self._llm_disabled:
+            if not self._llm_disabled_logged:
+                logger.critical(f"LLM auto-disabled after {self._llm_consecutive_failures} consecutive failures. "
+                               f"Running in fallback-only mode. Restart Ollama to re-enable.")
+                self._llm_disabled_logged = True
+            return None
+
         if self._idea_gen is None:
             try:
                 from .stage1_strategy_research import StrategyIdeaGenerator
                 # Build LLM config from MarcusConfig fields (P0-3 fix)
+                # LLMConfig.from_dict() expects config nested under 'llm' key
                 llm_config = {}
                 if self.config.llm_enabled:
                     llm_config = {
-                        'provider': self.config.llm_provider,
-                        'model': self.config.llm_model,
-                        'base_url': self.config.llm_base_url,
-                        'temperature': self.config.llm_temperature,
+                        'llm': {
+                            'provider': self.config.llm_provider,
+                            'model': self.config.llm_model,
+                            'base_url': self.config.llm_base_url,
+                            'temperature': self.config.llm_temperature,
+                        }
                     }
                     logger.info(f"LLM idea generation enabled: {self.config.llm_provider}/{self.config.llm_model}")
                 else:
@@ -177,6 +208,44 @@ class AutonomousResearchEngine:
                 logger.warning(f"StrategyIdeaGenerator unavailable: {e}. Using fallback.")
                 self._idea_gen = None
         return self._idea_gen
+
+    def _try_restart_ollama(self) -> bool:
+        """P6B: Attempt to restart Ollama if it crashed. Returns True on success."""
+        import subprocess
+        try:
+            import requests
+            url = getattr(self.config, 'llm_base_url', 'http://localhost:11434')
+            try:
+                resp = requests.get(f"{url}/api/tags", timeout=3)
+                if resp.status_code == 200:
+                    logger.info("Ollama is actually running — LLM failure was transient.")
+                    return True
+            except requests.exceptions.ConnectionError:
+                pass
+
+            # Ollama is down — try to restart it
+            logger.warning("Ollama not responding. Attempting restart...")
+            subprocess.Popen(
+                ['ollama', 'serve'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            )
+            import time
+            time.sleep(5)
+
+            # Verify restart
+            try:
+                resp = requests.get(f"{url}/api/tags", timeout=5)
+                if resp.status_code == 200:
+                    return True
+            except Exception:
+                pass
+
+            logger.error("Ollama restart failed. LLM will be auto-disabled.")
+            return False
+        except Exception as e:
+            logger.error(f"Ollama restart attempt error: {e}")
+            return False
 
     def _ensure_shared_data(self):
         """Load NQ data once and cache for reuse across all backtester instances.
@@ -261,15 +330,18 @@ class AutonomousResearchEngine:
         """Resolve strategy class from idea archetype for permutation testing."""
         try:
             archetype = idea.get('archetype', 'orb_breakout')
-            if 'orb' in archetype.lower():
-                from .strategies import VectorizedNQORB
-                return VectorizedNQORB
-            elif 'ma' in archetype.lower():
-                from .strategies import VectorizedMA
+            if 'ma_crossover' in archetype:
+                from .vector_engine import VectorizedMA
                 return VectorizedMA
+            elif archetype == 'overnight':
+                from .vector_engine import VectorizedOvernight
+                return VectorizedOvernight
             else:
-                # Default to ORB for unknown archetypes
-                from .strategies import VectorizedNQORB
+                # All other archetypes (ORB, EOD, power_hour, first_hour_fade,
+                # lunch_range_fade, gap_fill, lunch_hour_breakout) use VectorizedNQORB
+                # with different time windows — the StrategyMapper in
+                # stage2_rigorous_backtest handles param mapping.
+                from .vector_engine import VectorizedNQORB
                 return VectorizedNQORB
         except ImportError:
             return None
@@ -309,10 +381,11 @@ class AutonomousResearchEngine:
     # =========================================================================
 
     def _generate_ideas(self, n: int) -> List[Dict[str, Any]]:
-        """Generate strategy ideas, filtering out graveyard hashes.
+        """Generate strategy ideas, filtering out already-tested hashes.
 
-        Uses a two-tier fallback: primary generator → engine fallback grid.
-        Both tiers are graveyard-filtered to avoid re-testing killed strategies.
+        Uses a two-tier fallback: primary generator -> engine fallback grid.
+        Filters against graveyard (killed), lifecycle (all stages), and
+        in-memory session set to prevent retesting.
         """
         gen = self._get_idea_generator()
 
@@ -323,9 +396,25 @@ class AutonomousResearchEngine:
                 raw_ideas = gen.generate_ideas(n_ideas=n * 2)  # request extra to survive filtering
             except Exception as e:
                 logger.warning(f"Idea generation failed: {e}. Using engine fallback.")
+                # P1-2: Track consecutive LLM failures, attempt recovery before disable
+                self._llm_consecutive_failures += 1
+                if self._llm_consecutive_failures >= 3:
+                    # P6B: Attempt to restart Ollama before giving up
+                    if self._try_restart_ollama():
+                        logger.info("Ollama restarted successfully. Re-enabling LLM.")
+                        self._llm_consecutive_failures = 0
+                        self._idea_gen = None  # Force re-init on next cycle
+                    else:
+                        self._llm_disabled = True
 
-        # Graveyard-filter tier 1 results
-        filtered = self._graveyard_filter(raw_ideas)
+            # P1-2: Reset failure counter on successful idea generation
+            if raw_ideas:
+                self._llm_consecutive_failures = 0
+                self._llm_disabled = False
+                self._llm_disabled_logged = False
+
+        # Full dedup filter (graveyard + lifecycle + session memory)
+        filtered = self._dedup_filter(raw_ideas)
 
         # --- Tier 2: engine-level fallback if tier 1 yielded too few ---
         if len(filtered) < n:
@@ -337,7 +426,9 @@ class AutonomousResearchEngine:
                 idea_hash = self._hash_idea(idea)
                 if idea_hash in existing_hashes:
                     continue
-                if self.lifecycle.is_in_graveyard(idea_hash):
+                if idea_hash in self._tested_this_session:
+                    continue
+                if self.lifecycle.is_already_tested(idea_hash):
                     continue
                 idea['_hash'] = idea_hash
                 filtered.append(idea)
@@ -354,8 +445,13 @@ class AutonomousResearchEngine:
         if final:
             max_pct = max(arch_counts.values()) / len(final)
             if max_pct > 0.6:
-                logger.warning(f"Low diversity: {max(arch_counts, key=arch_counts.get)} "
-                               f"is {max_pct:.0%} of batch")
+                dominant = max(arch_counts, key=arch_counts.get)
+                logger.warning(f"Low diversity: {dominant} is {max_pct:.0%} of batch")
+
+        # --- Zero-idea recovery ---
+        if not final:
+            logger.warning("Zero ideas after all filters. Attempting recovery via winner mutations.")
+            final = self._generate_winner_mutations(n)
 
         return final
 
@@ -371,6 +467,146 @@ class AutonomousResearchEngine:
             filtered.append(idea)
         return filtered
 
+    def _dedup_filter(self, ideas: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Full dedup: graveyard + lifecycle + session memory.
+
+        Closes the gap where winning strategies were never graveyarded
+        and got retested hundreds of times.
+        """
+        filtered = []
+        for idea in ideas:
+            idea_hash = self._hash_idea(idea)
+            # Fast: check in-memory session set first
+            if idea_hash in self._tested_this_session:
+                continue
+            # DB: check graveyard + lifecycle (winners, in-progress, archived)
+            if self.lifecycle.is_already_tested(idea_hash):
+                logger.debug(f"Skipping already-tested: {idea.get('strategy_name', 'unknown')}")
+                continue
+            idea['_hash'] = idea_hash
+            filtered.append(idea)
+        return filtered
+
+    def _generate_winner_mutations(self, n: int) -> List[Dict[str, Any]]:
+        """Generate ideas by perturbing parameters of known winners.
+
+        Last-resort recovery when all fallback pools and LLM are exhausted.
+        Loads top winners from DB, randomly perturbs 1-2 numeric params by ±10-30%.
+        """
+        ideas = []
+        try:
+            import sqlite3 as _sqlite3
+            conn = _sqlite3.connect(self.config.db_path)
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT strategy_name, archetype, params_json
+                FROM winning_strategies
+                WHERE is_active = 1
+                ORDER BY sharpe_ratio DESC
+                LIMIT 10
+            """)
+            rows = cursor.fetchall()
+            conn.close()
+
+            if not rows:
+                logger.warning("No winners to mutate — no recovery possible.")
+                return []
+
+            for row in rows:
+                name, archetype, params_json = row
+                try:
+                    params = json.loads(params_json) if params_json else {}
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+                # Generate 3 mutations per winner
+                for _ in range(3):
+                    mutated = params.copy()
+                    numeric_keys = [k for k, v in mutated.items() if isinstance(v, (int, float))]
+                    if not numeric_keys:
+                        continue
+
+                    # Perturb 1-2 random params
+                    n_perturb = min(2, len(numeric_keys))
+                    keys_to_perturb = list(np.random.choice(numeric_keys, n_perturb, replace=False))
+                    for key in keys_to_perturb:
+                        factor = np.random.uniform(0.7, 1.3)
+                        old_val = mutated[key]
+                        if isinstance(old_val, int):
+                            mutated[key] = max(1, int(round(old_val * factor)))
+                        else:
+                            mutated[key] = round(old_val * factor, 4)
+
+                    mut_name = f"MUT_{name}_{np.random.randint(1000, 9999)}"
+                    idea = {
+                        'strategy_name': mut_name,
+                        'archetype': archetype or 'orb_breakout',
+                        'variant': 'mutation',
+                        'params': mutated,
+                        'hypothesis': f"Mutation of winner {name}",
+                    }
+
+                    idea_hash = self._hash_idea(idea)
+                    if idea_hash in self._tested_this_session:
+                        continue
+                    if self.lifecycle.is_already_tested(idea_hash):
+                        continue
+
+                    idea['_hash'] = idea_hash
+                    ideas.append(idea)
+                    if len(ideas) >= n:
+                        break
+                if len(ideas) >= n:
+                    break
+
+            if ideas:
+                logger.info(f"Winner mutation recovery: generated {len(ideas)} ideas")
+        except Exception as e:
+            logger.error(f"Winner mutation failed: {e}")
+
+        return ideas[:n]
+
+    def _get_archetype_exhaustion_stats(self) -> Dict[str, Dict]:
+        """Query lifecycle table for per-archetype test counts, pass rates, and last test cycle.
+
+        Used by _fallback_ideas() to skip exhausted archetypes with a cooldown period.
+        """
+        try:
+            import sqlite3 as _sqlite3
+            conn = _sqlite3.connect(self.config.db_path)
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    archetype,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN current_stage IN ('STAGE2_PASS','STAGE3_PASS','STAGE4_PASS','STAGE5_PASS','DEPLOYED') THEN 1 ELSE 0 END) as s2_plus,
+                    MAX(id) as last_id
+                FROM strategy_lifecycle
+                WHERE archetype IS NOT NULL AND archetype != ''
+                GROUP BY archetype
+            """)
+            rows = cursor.fetchall()
+            # Get approximate cycle number from last lifecycle ID
+            # (IDs are auto-increment, roughly correlated with cycle count)
+            cursor.execute("SELECT MAX(cycle_num) FROM cycle_log")
+            max_cycle_row = cursor.fetchone()
+            max_cycle = max_cycle_row[0] if max_cycle_row and max_cycle_row[0] else 0
+            conn.close()
+
+            result = {}
+            for row in rows:
+                if not row[0]:
+                    continue
+                result[row[0]] = {
+                    'total_tested': row[1] or 0,
+                    's2_plus_count': row[2] or 0,
+                    'last_tested_cycle': max_cycle,  # approximate
+                }
+            return result
+        except Exception as e:
+            logger.warning(f"Archetype exhaustion query failed: {e}")
+            return {}
+
     def _fallback_ideas(self, n: int) -> List[Dict[str, Any]]:
         """Diverse deterministic idea generation covering wide parameter space.
 
@@ -380,11 +616,29 @@ class AutonomousResearchEngine:
         - EOD momentum (afternoon breakout strategies)
         - Lunch hour breakout (mid-day range break)
         - Gap fill fade (counter-trend gap strategies)
+        - Overnight (18:00-09:30 ET mean-reversion / range strategies)
 
         Shuffled each call to explore different regions of parameter space.
         """
         import itertools
         ideas = []
+
+        # === EXHAUSTION CHECK with COOLDOWN -- Skip archetypes with >200 tests and 0 S2 passes ===
+        # But re-enable after 200 cycles so LLM or new param ranges can explore them
+        exhaustion_stats = self._get_archetype_exhaustion_stats()
+        current_cycle = self.registry.get_next_cycle_num()
+        exhausted_archetypes = set()
+        for arch, stats in exhaustion_stats.items():
+            if stats['total_tested'] > 200 and stats['s2_plus_count'] == 0:
+                # Cooldown: skip for 200 cycles, then re-enable
+                last_tested = stats.get('last_tested_cycle', 0)
+                cycles_since = current_cycle - last_tested if last_tested else 0
+                if cycles_since < 200:
+                    exhausted_archetypes.add(arch)
+                    logger.info(f"Skipping exhausted archetype: {arch} "
+                               f"(tested={stats['total_tested']}, S2_pass=0, cooldown={200-cycles_since} cycles)")
+                else:
+                    logger.info(f"Re-enabling exhausted archetype: {arch} after {cycles_since} cycle cooldown")
 
         # === 1. ORB Breakout (~4400 combos) ===
         orb_periods = [
@@ -565,12 +819,62 @@ class AutonomousResearchEngine:
                 'hypothesis': f"Lunch range fade: {rs}-{re}, EMA({ema}), BB({bb}), {sl}x SL"
             })
 
+        # === 9. Overnight Session (~150 combos) ===
+        # Exploits overnight NQ range compression and mean reversion (18:00-09:30 ET)
+        # Completely uncorrelated with RTH strategies -- fills largest portfolio gap
+        on_session_starts = ["18:00", "19:00", "20:00"]
+        on_session_ends = ["08:00", "08:30", "09:00", "09:15"]
+        on_range_windows = [30, 60, 90, 120]  # minutes for range formation
+        on_sl_values = [1.0, 1.5, 2.0, 2.5]
+        on_tp_values = [1.5, 2.0, 3.0, 4.0]
+        on_ema_values = [20, 50, 100]
+        for sess_start, sess_end, rng_win, sl, tp, ema in itertools.product(
+            on_session_starts, on_session_ends, on_range_windows,
+            on_sl_values, on_tp_values, on_ema_values
+        ):
+            if tp <= sl:
+                continue
+            name = (f"ON_{sess_start.replace(':','')}_"
+                    f"{sess_end.replace(':','')}_"
+                    f"R{rng_win}_SL{sl}_TP{tp}_EMA{ema}")
+            ideas.append({
+                'strategy_name': name,
+                'archetype': 'overnight',
+                'variant': f"{sess_start}-{sess_end}",
+                'params': {
+                    'session_start': sess_start,
+                    'session_end': sess_end,
+                    'range_minutes': rng_win,
+                    'ema_filter': ema,
+                    'atr_filter': 14,
+                    'sl_atr_mult': sl,
+                    'tp_atr_mult': tp,
+                },
+                'hypothesis': (f"Overnight mean-reversion: {sess_start}-{sess_end}, "
+                               f"{rng_win}min range, EMA({ema}), {sl}x SL/{tp}x TP")
+            })
+
         # === BALANCED ROUND-ROBIN: ensure diverse archetypes in every batch ===
         # Group by archetype, shuffle within each, then interleave
         from collections import defaultdict
         by_archetype = defaultdict(list)
         for idea in ideas:
             by_archetype[idea['archetype']].append(idea)
+
+        # P0-1: Remove exhausted archetypes from the pool before round-robin
+        for arch in exhausted_archetypes:
+            if arch in by_archetype:
+                removed = len(by_archetype[arch])
+                del by_archetype[arch]
+                if removed > 0:
+                    logger.info(f"Removed {removed} {arch} ideas from fallback pool (exhausted)")
+
+        # Boost untested archetypes: give 3x representation to never-tested archetypes
+        for arch in list(by_archetype.keys()):
+            arch_stats = exhaustion_stats.get(arch, {})
+            if arch_stats.get('total_tested', 0) == 0 and len(by_archetype[arch]) > 0:
+                by_archetype[arch] = by_archetype[arch] * 3
+                logger.info(f"Boosting untested archetype: {arch} (3x representation)")
 
         # Shuffle within each archetype
         for arch_ideas in by_archetype.values():
@@ -596,6 +900,14 @@ class AutonomousResearchEngine:
             for key in exhausted:
                 del archetype_iters[key]
                 archetype_keys.remove(key)
+
+        # P0-1: CRITICAL alert if all archetypes are exhausted
+        if not balanced:
+            logger.critical(
+                f"ALL fallback archetypes exhausted. "
+                f"Total tested: {sum(s['total_tested'] for s in exhaustion_stats.values())}. "
+                f"Consider adding new archetypes or adjusting quality thresholds."
+            )
 
         return balanced[:n]
 
@@ -751,7 +1063,7 @@ class AutonomousResearchEngine:
                 metrics_out['failure_reason'] = "; ".join(reasons)
                 return False, metrics_out
 
-            # ─── Statistical Gate 1: Sharpe Confidence Interval ───────────
+            # --- Statistical Gate 1: Sharpe Confidence Interval ---
             # Uses equity returns from S1 (more trades, more data, less noise from cost stress)
             equity_returns = s1_equity_returns
             if equity_returns is None:
@@ -769,7 +1081,7 @@ class AutonomousResearchEngine:
 
                     if ci_lower <= 0:
                         metrics_out['failure_reason'] = (
-                            f"Sharpe CI crosses zero: [{ci_lower:.3f}, {ci_upper:.3f}] — "
+                            f"Sharpe CI crosses zero: [{ci_lower:.3f}, {ci_upper:.3f}] -- "
                             f"not statistically significant at {self.config.stat_confidence_level:.0%}"
                         )
                         logger.info(f"S2 STAT REJECT {idea.get('strategy_name', '?')}: "
@@ -781,7 +1093,7 @@ class AutonomousResearchEngine:
                     logger.warning(f"Sharpe CI computation failed: {e}")
                     metrics_out['sharpe_ci_error'] = str(e)
 
-            # ─── Statistical Gate 2: Permutation Test ─────────────────────
+            # --- Statistical Gate 2: Permutation Test ---
             if self.config.s2_permutation_enabled and equity_returns is not None and len(equity_returns) > 50:
                 try:
                     from .skeptic import StrategySkeptic
@@ -809,7 +1121,7 @@ class AutonomousResearchEngine:
                             if perm_result.get('verdict', '') != 'PASS':
                                 metrics_out['failure_reason'] = (
                                     f"Permutation test FAIL: p={perm_result.get('p_value', 1.0):.3f} "
-                                    f"({perm_result.get('n_sims', 0)} sims) — "
+                                    f"({perm_result.get('n_sims', 0)} sims) -- "
                                     f"indistinguishable from random"
                                 )
                                 logger.info(f"S2 PERM REJECT {idea.get('strategy_name', '?')}: "
@@ -1006,7 +1318,7 @@ class AutonomousResearchEngine:
             metrics_out['failure_reason'] = "; ".join(reasons)
             return False, metrics_out
 
-        # ─── WFO Analytics: Parameter Robustness Score & Cliff Detection ────
+        # --- WFO Analytics: Parameter Robustness Score & Cliff Detection ---
         # Build DataFrame from variant results for ParameterSensitivityMapper
         try:
             from .wfo_analytics import ParameterSensitivityMapper
@@ -1036,7 +1348,7 @@ class AutonomousResearchEngine:
                 min_rob = getattr(self.config, 's4_min_robustness_score', 50.0)
                 if rob_score < min_rob:
                     metrics_out['failure_reason'] = (
-                        f"Robustness score {rob_score:.0f} < {min_rob:.0f} — "
+                        f"Robustness score {rob_score:.0f} < {min_rob:.0f} -- "
                         f"{robustness.get('interpretation', 'fragile parameters')}"
                     )
                     logger.info(f"S4 ROBUSTNESS REJECT {idea.get('strategy_name', '?')}: "
@@ -1137,7 +1449,7 @@ class AutonomousResearchEngine:
             metrics_out['failure_reason'] = f"Max correlation {max_corr:.3f} >= {self.config.s5_max_daily_correlation}"
             return False, metrics_out
 
-        # ─── Statistical Gate: Deflated Sharpe Ratio (Multiple Testing Correction) ──
+        # --- Statistical Gate: Deflated Sharpe Ratio (Multiple Testing Correction) ---
         # Bailey & Lopez de Prado (2014): Adjusts Sharpe for the number of strategies tested
         if equity_returns is not None and len(equity_returns) > 50:
             try:
@@ -1173,7 +1485,7 @@ class AutonomousResearchEngine:
                         metrics_out['failure_reason'] = (
                             f"Deflated Sharpe FAIL: DSR probability={dsr_prob:.3f} < "
                             f"{self.config.stat_min_dsr_probability} "
-                            f"(n_trials={n_trials}, raw_sharpe={raw_sharpe:.3f}) — "
+                            f"(n_trials={n_trials}, raw_sharpe={raw_sharpe:.3f}) -- "
                             f"likely result of data mining"
                         )
                         logger.info(f"S5 DSR REJECT {idea.get('strategy_name', '?')}: "
@@ -1187,7 +1499,14 @@ class AutonomousResearchEngine:
                 logger.warning(f"Deflated Sharpe computation failed (non-fatal): {e}")
                 metrics_out['dsr_error'] = str(e)
 
-        # ─── NQmain Portfolio Fit: Time Window Overlap Check ─────────────
+        # --- NQmain Portfolio Fit: Complementarity Check ---
+        # The NQ Main portfolio (Triple NQ Variant) covers nearly 24h with 6 sub-strategies.
+        # Time overlap alone is no longer a useful rejection signal.
+        # Instead, we use a COMPOSITE score that weights:
+        #   - Regime complement (most important): mean-reversion is uncovered
+        #   - Gap coverage: lunch hour, post-close dead zone
+        #   - Time independence: still useful but not dominant
+        # Reject only if the composite complementary score is too low.
         try:
             from .nqmain_analyzer import (
                 get_nqmain_profile, get_strategy_time_window,
@@ -1203,19 +1522,24 @@ class AutonomousResearchEngine:
             metrics_out['nqmain_gap_coverage'] = comp_score['gap_coverage']
             metrics_out['strategy_time_window'] = comp_score['strategy_window']
 
-            max_overlap = getattr(self.config, 's5_max_nqmain_overlap', 0.30)
-            # Only block full ORB overlaps (same archetype, high time overlap)
-            if archetype == 'orb_breakout' and comp_score['time_overlap'] > max_overlap:
+            # Gate: reject strategies with low complementary score
+            # Score < 25 means: high time overlap AND same regime AND no gap coverage
+            # This is a much more permissive gate than the old 30% time overlap hard block
+            min_comp_score = getattr(self.config, 's5_min_complementary_score', 25)
+            if comp_score['complementary_score'] < min_comp_score:
                 metrics_out['failure_reason'] = (
-                    f"NQmain overlap too high: {comp_score['time_overlap']:.0%} "
-                    f"(ORB vs ORB) — redundant with NQmain"
+                    f"NQmain complementarity too low: score={comp_score['complementary_score']:.0f} "
+                    f"< {min_comp_score} ({archetype}, overlap={comp_score['time_overlap']:.0%}, "
+                    f"regime_complement={comp_score['regime_complement']}) -- "
+                    f"redundant with portfolio"
                 )
                 logger.info(f"S5 NQMAIN REJECT {idea.get('strategy_name', '?')}: "
-                            f"overlap={comp_score['time_overlap']:.0%}")
+                            f"comp_score={comp_score['complementary_score']:.0f}")
                 return False, metrics_out
 
-            logger.info(f"S5 NQmain fit: overlap={comp_score['time_overlap']:.0%}, "
-                        f"complement={comp_score['complementary_score']:.0f}")
+            logger.info(f"S5 NQmain fit: comp_score={comp_score['complementary_score']:.0f}, "
+                        f"overlap={comp_score['time_overlap']:.0%}, "
+                        f"regime_complement={comp_score['regime_complement']}")
 
         except Exception as e:
             logger.warning(f"NQmain overlap check failed (non-fatal): {e}")
@@ -1261,6 +1585,11 @@ class AutonomousResearchEngine:
                     result.error_details.append(f"{idea.get('strategy_name', '?')}: {str(e)}")
                     logger.error(f"Idea processing error: {e}\n{traceback.format_exc()}")
 
+            # P0-4 ENHANCED: Diagnostic if S1 passes occurred but best_sharpe is still 0
+            if result.stage1_passed > 0 and result.best_sharpe == 0.0:
+                logger.warning(f"P0-4: {result.stage1_passed} S1 passes but best_sharpe=0.00. "
+                              f"S1 tracking may have a bug.")
+
             # 3. Run disposal sweep
             disposal = self.lifecycle.run_disposal_sweep()
             result.disposed = sum(disposal.values())
@@ -1285,7 +1614,10 @@ class AutonomousResearchEngine:
         name = idea.get('strategy_name', 'unknown')
         idea_hash = idea.get('_hash', self._hash_idea(idea))
 
-        # ─── Pre-S1: Complexity Cap ──────────────────────────────────
+        # Track in session memory to prevent retesting within same daemon run
+        self._tested_this_session.add(idea_hash)
+
+        # --- Pre-S1: Complexity Cap ---
         # Reject over-parameterized strategies before wasting compute
         params = idea.get('params', {})
         numeric_params = sum(1 for v in params.values() if isinstance(v, (int, float)))
@@ -1324,7 +1656,10 @@ class AutonomousResearchEngine:
         result.stage1_passed += 1
 
         # P0-4: Track best Sharpe from S1 onwards (not just S5)
-        s1_sharpe = float(s1_metrics.get('sharpe_ratio', 0))
+        try:
+            s1_sharpe = float(s1_metrics.get('sharpe_ratio', 0) or 0)
+        except (TypeError, ValueError):
+            s1_sharpe = 0.0
         if s1_sharpe > result.best_sharpe:
             result.best_sharpe = s1_sharpe
             result.best_strategy_name = name
@@ -1372,7 +1707,7 @@ class AutonomousResearchEngine:
             return
 
         self.lifecycle.promote(lc_id, 'STAGE4_PASS', s4_db)
-        self.monitor.log_promotion(name, 'STAGE4_PASS', s4_metrics.get('sharpe_ratio', 0))
+        self.monitor.log_promotion(name, 'STAGE4_PASS', s2_metrics.get('sharpe_ratio', 0))
         result.stage4_passed += 1
 
         # Stage 5: Complementarity
@@ -1399,7 +1734,7 @@ class AutonomousResearchEngine:
 
         if not saved:
             # MC VaR95 gate rejected - still log as S5 pass but not saved as winner
-            logger.warning(f"MC gate rejected {name} after S5 pass — too much tail risk")
+            logger.warning(f"MC gate rejected {name} after S5 pass -- too much tail risk")
             self._archive_run(idea, {**s1_db, **s2_db, **s5_db}, 'MC_REJECTED')
             return
 
@@ -1453,12 +1788,12 @@ class AutonomousResearchEngine:
                 except Exception as e:
                     logger.warning(f"GPU Monte Carlo failed: {e}")
 
-            # ─── Monte Carlo VaR95 Gate ───────────────────────────────────
+            # --- Monte Carlo VaR95 Gate ---
             # Reject if worst-case loss at 95th percentile is too severe
             if mc_var95 < self.config.mc_min_var95 and mc_var95 != 0.0:
                 logger.warning(
                     f"MC VaR95 REJECT {idea.get('strategy_name', '?')}: "
-                    f"VaR95={mc_var95:.3f} < {self.config.mc_min_var95} — "
+                    f"VaR95={mc_var95:.3f} < {self.config.mc_min_var95} -- "
                     f"too much tail risk"
                 )
                 return False

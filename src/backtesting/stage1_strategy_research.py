@@ -63,6 +63,26 @@ STRATEGY_ARCHETYPES = {
         "params": ["short_window", "long_window"],
         "variants": ["sma", "ema"],
     },
+    "first_hour_fade": {
+        "description": "Fade retail overreaction in the first hour (10:15-11:30)",
+        "params": ["entry_time", "exit_time", "ema_filter", "sl_atr_mult", "rsi_threshold"],
+        "variants": ["standard"],
+    },
+    "power_hour_momentum": {
+        "description": "Final hour momentum capture (14:00-15:30)",
+        "params": ["entry_time", "exit_time", "ema_filter", "sl_atr_mult", "tp_atr_mult"],
+        "variants": ["standard"],
+    },
+    "lunch_range_fade": {
+        "description": "Mean reversion during lunch hour liquidity trough (11:30-13:30)",
+        "params": ["range_start", "range_end", "ema_filter", "sl_atr_mult", "bb_mult"],
+        "variants": ["standard"],
+    },
+    "overnight": {
+        "description": "Overnight session mean-reversion (18:00-09:30 ET)",
+        "params": ["session_start", "session_end", "range_minutes", "ema_filter", "sl_atr_mult", "tp_atr_mult"],
+        "variants": ["standard"],
+    },
 }
 
 
@@ -95,13 +115,14 @@ class StrategyIdeaGenerator:
             logger.warning(f"Could not load tested strategies: {e}")
 
     def _hash_idea(self, idea: Dict) -> str:
-        """Generate a unique hash for a strategy idea to detect duplicates."""
-        key_fields = {
-            "archetype": idea.get("archetype", ""),
-            "variant": idea.get("variant", ""),
-            "params": json.dumps(idea.get("params", {}), sort_keys=True),
-        }
-        return hashlib.sha256(json.dumps(key_fields, sort_keys=True).encode()).hexdigest()
+        """Generate a unique hash for a strategy idea to detect duplicates.
+        Must match research_engine._hash_idea() for consistent dedup."""
+        content = json.dumps({
+            'archetype': idea.get('archetype', ''),
+            'variant': idea.get('variant', ''),
+            'params': idea.get('params', {}),
+        }, sort_keys=True, default=str)
+        return hashlib.sha256(content.encode()).hexdigest()
 
     def generate_ideas(self, n_ideas: int = 5, context: str = "") -> List[Dict[str, Any]]:
         """
@@ -119,7 +140,7 @@ class StrategyIdeaGenerator:
             dedup_note = f"\nIMPORTANT: We have already tested {len(self._tested_hashes)} strategies. Generate NOVEL variations, not repeats."
 
         system_prompt = (
-            "You are a quantitative trading strategy researcher. "
+            "You are a quantitative trading strategy researcher for NQ E-mini futures. "
             "You must generate strategy ideas that map to our existing backtest implementations.\n\n"
             f"Available strategy archetypes:\n{archetype_list}\n\n"
             "Each idea MUST specify:\n"
@@ -129,7 +150,24 @@ class StrategyIdeaGenerator:
             "4. 'hypothesis' - why this parameter combination might work\n"
             "5. 'strategy_name' - a unique descriptive name\n\n"
             "CRITICAL: Only use archetypes from the list above. Do NOT invent new strategy types "
-            "that don't have implementations."
+            "that don't have implementations.\n\n"
+            "=== PORTFOLIO CONTEXT (VERY IMPORTANT) ===\n"
+            "We run a LIVE portfolio called 'Triple NQ Variant' with 6 sub-strategies:\n"
+            "  1. Trend NQ (MA crossover, trending regime, 09:45-15:45)\n"
+            "  2. Long ORB (opening range breakout, long only, 09:45-15:45)\n"
+            "  3. Short ORB (opening range breakout, short only, 09:45-15:45)\n"
+            "  4. Simple Short (counter-trend short, VIX-gated, 09:30-15:45)\n"
+            "  5. Overnight Drift (trend following, 18:05-09:25)\n"
+            "  6. Universal Trend Edge (EMA crossover, 09:30-15:45)\n\n"
+            "ALL 6 strategies are trend-following, breakout, or momentum. NONE use mean-reversion.\n"
+            "The portfolio trades 1 position at a time (position_size==0 gate).\n\n"
+            "YOUR GOAL: Generate strategies that COMPLEMENT this portfolio. The best strategies:\n"
+            "  - Use MEAN REVERSION (the uncovered regime) -- e.g., lunch_range_fade, first_hour_fade, gap_fill_fade\n"
+            "  - Target times when NQmain is WEAK: lunch hour (11:30-13:30), post-close (15:45-18:05)\n"
+            "  - Are UNCORRELATED by construction: different entry logic, different regime\n"
+            "  - Focus on first_hour_fade, lunch_range_fade, gap_fill_fade -- these have real market edges\n\n"
+            "DO NOT generate more ORB breakout or MA crossover strategies -- the portfolio is saturated with those.\n"
+            "Prioritize: first_hour_fade > lunch_range_fade > gap_fill_fade > overnight > power_hour_momentum\n"
             f"{dedup_note}"
         )
 

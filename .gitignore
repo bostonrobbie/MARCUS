@@ -1,72 +1,37 @@
-# Python
+# Core Ignore Rules
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-*.egg-info/
-*.egg
-dist/
-build/
-.eggs/
-.venv/
-venv/
-env/
-gpu_env/
-
-# Environment & secrets
 .env
-.env.*
-*.key
-*.pem
-
-# Databases
-*.db
-*.sqlite
-*.sqlite3
-
-# Binaries
-*.exe
-*.dll
-*.dylib
-
-# Node.js
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Build artifacts
-dist/
-coverage/
-
-# Logs & outputs
-logs/
-*.log
-outputs/
-reports/
-cache/
-
-# OS
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# IDE
+.venv
 .vscode/
 .idea/
-*.swp
-*.swo
-*~
 
-# Data (large files tracked separately)
-*.pid
-runs/
+# Artifacts & Data (Global)
+*.html
+*.csv
+*.png
+*.jpg
+*.db
+!data/*.zip
+*.log
+*.txt
+!ES Trend.txt
+!requirements.txt
 
-# Project-specific
-backtests.db
-marcus_registry*.db
-optimization_results.csv
-backtest_report.html
-drift_results.txt
-research_output.txt
-nul
+# Marcus database backups (compressed JSON exports for portability)
+!research/db_backups/
+!research/db_backups/*.json.gz
+
+# Directories to Ignore
+data/
+!data/*.zip
+logs/
+screenshots/
+cache/
+outputs/
+gpu_env/
+
+# Large Binaries
+*.exe
+*.dll
+*.iso

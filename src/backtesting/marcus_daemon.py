@@ -114,6 +114,8 @@ class MarcusDaemon:
             'total_cycles': 0,
             'total_errors': 0,
             'started_at': None,
+            'paused': False,
+            'stopped': False,
         }
 
     # =========================================================================
@@ -125,6 +127,33 @@ class MarcusDaemon:
         self._running = True
         self._state['started_at'] = datetime.now().isoformat()
         self._load_state()
+        # Clear stopped/paused flags — we're being explicitly started
+        self._state['paused'] = False
+        self._state['stopped'] = False
+        self._save_state(force_flags={'paused': False, 'stopped': False})
+
+        # PID Guard - prevent duplicate instances
+        self._pid_file = os.path.join(self.config.logs_dir, "marcus.pid")
+        if os.path.exists(self._pid_file):
+            try:
+                with open(self._pid_file, 'r') as f:
+                    old_pid = int(f.read().strip())
+                # Check if process is still alive (Windows)
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                handle = kernel32.OpenProcess(0x1000, False, old_pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+                if handle:
+                    kernel32.CloseHandle(handle)
+                    self.logger.error(f"Another Marcus instance is running (PID {old_pid}). Exiting.")
+                    sys.exit(1)
+                else:
+                    self.logger.warning(f"Stale PID file found (PID {old_pid} not running). Cleaning up.")
+            except (ValueError, OSError, Exception) as e:
+                self.logger.warning(f"PID check failed ({e}), proceeding anyway.")
+        # Write our PID
+        with open(self._pid_file, 'w') as f:
+            f.write(str(os.getpid()))
+        self.logger.info(f"PID file written: {self._pid_file} (PID {os.getpid()})")
 
         # Register signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -138,6 +167,7 @@ class MarcusDaemon:
         # Startup checks
         self._check_gpu()
         self._validate_data()
+        self._check_llm_health()
 
         # Initial dashboard build
         try:
@@ -155,6 +185,17 @@ class MarcusDaemon:
         while self._running:
             try:
                 now = datetime.now()
+
+                # 0. Check dashboard-written control flags (pause/stop)
+                self._check_control_flags()
+                if not self._running:
+                    break
+                if self._state.get('paused'):
+                    time.sleep(5)
+                    # Still heartbeat while paused so dashboard shows PAUSED not OFFLINE
+                    if self._should_heartbeat(now):
+                        self._heartbeat()
+                    continue
 
                 # 1. Research cycle (with concurrency guard)
                 if not self._cycle_running and self._should_run_cycle(now):
@@ -206,18 +247,81 @@ class MarcusDaemon:
         """Graceful shutdown."""
         self.logger.info("MARCUS DAEMON STOPPING")
         self._running = False
-        self._save_state()
+        self._state['stopped'] = True
+        self._state['paused'] = False
+        self._save_state(force_flags={'stopped': True, 'paused': False})
         self.monitor.log_event("Daemon", "SHUTDOWN", "Marcus daemon stopping gracefully", "INFO")
+        # Clean up PID file
+        pid_file = getattr(self, '_pid_file', None)
+        if pid_file and os.path.exists(pid_file):
+            try:
+                os.remove(pid_file)
+                self.logger.info("PID file removed.")
+            except OSError:
+                pass
         # Final dashboard update
         try:
             self.dashboard.rebuild()
         except Exception:
             pass
 
+        # P0-3: Final session summary on shutdown
+        try:
+            summary_path = self.dashboard.generate_session_summary(
+                session_start=self._state.get('started_at', '')
+            )
+            if summary_path:
+                self.logger.info(f"Shutdown session summary: {summary_path}")
+        except Exception as e:
+            self.logger.error(f"Shutdown summary failed: {e}")
+
     def _signal_handler(self, signum, frame):
         """Handle OS signals for graceful shutdown."""
         self.logger.info(f"Signal {signum} received. Initiating shutdown...")
         self.stop()
+
+    def _check_control_flags(self):
+        """Read dashboard-written control flags from state file.
+
+        The dashboard (serve-web.js) sets paused/stopped flags in the state file.
+        We check these every loop iteration so the dashboard can pause/stop us remotely.
+        """
+        try:
+            if os.path.exists(self.config.state_file):
+                with open(self.config.state_file, 'r') as f:
+                    saved = json.load(f)
+
+                # Check stopped flag
+                if saved.get('stopped', False):
+                    self.logger.info("STOP flag detected in state file. Shutting down.")
+                    self._running = False
+                    return
+
+                # Check paused flag
+                was_paused = self._state.get('paused', False)
+                now_paused = saved.get('paused', False)
+                self._state['paused'] = now_paused
+
+                if now_paused and not was_paused:
+                    self.logger.info("PAUSE flag detected in state file. Pausing research.")
+                elif not now_paused and was_paused:
+                    self.logger.info("RESUME detected in state file. Resuming research.")
+
+                # Pick up guide_text / directive if present
+                if 'guide_text' in saved:
+                    self._state['guide_text'] = saved['guide_text']
+                if 'directive' in saved:
+                    self._state['directive'] = saved['directive']
+                if 'exploration_mode' in saved:
+                    self._state['exploration_mode'] = saved['exploration_mode']
+                if 'active_objective' in saved:
+                    self._state['active_objective'] = saved['active_objective']
+                if 'active_preset_id' in saved:
+                    self._state['active_preset_id'] = saved['active_preset_id']
+
+        except (json.JSONDecodeError, IOError) as e:
+            # State file corrupt or locked — skip this check
+            pass
 
     # =========================================================================
     # Scheduled Tasks
@@ -298,6 +402,17 @@ class MarcusDaemon:
 
         self._save_state()
 
+        # P0-3: Generate session summary every 50 cycles
+        if self._state['total_cycles'] > 0 and self._state['total_cycles'] % 50 == 0:
+            try:
+                summary_path = self.dashboard.generate_session_summary(
+                    session_start=self._state.get('started_at', '')
+                )
+                if summary_path:
+                    self.logger.info(f"Session summary (cycle {self._state['total_cycles']}): {summary_path}")
+            except Exception as e:
+                self.logger.error(f"Session summary generation failed: {e}")
+
     def _refresh_dashboard(self):
         """Rebuild the HTML dashboard."""
         try:
@@ -353,16 +468,86 @@ class MarcusDaemon:
                 success=True
             )
 
+    def _check_llm_health(self):
+        """Verify LLM (Ollama) availability on startup."""
+        if not self.config.llm_enabled:
+            self.logger.info("LLM idea generation disabled in config.")
+            self.monitor.log_event("Daemon", "LLM_STATUS",
+                                   "LLM disabled in config", "INFO")
+            return
+
+        try:
+            import requests
+            url = self.config.llm_base_url.rstrip('/')
+            resp = requests.get(f"{url}/api/tags", timeout=5)
+            if resp.status_code == 200:
+                models = resp.json().get('models', [])
+                model_names = [m.get('name', '') for m in models]
+                target = self.config.llm_model
+                if any(target in name for name in model_names):
+                    self.logger.info(f"LLM ACTIVE: Ollama/{target} at {url}")
+                    self.monitor.log_event("Daemon", "LLM_STATUS",
+                                           f"LLM active: {target}", "INFO")
+                else:
+                    self.logger.warning(
+                        f"LLM model '{target}' not found in Ollama. "
+                        f"Available: {model_names}. LLM ideas will fail.")
+                    self.monitor.log_event("Daemon", "LLM_STATUS",
+                                           f"Model {target} not found", "WARNING")
+            else:
+                self.logger.warning(f"Ollama responded with status {resp.status_code}")
+        except Exception as e:
+            self.logger.warning(f"LLM health check failed: {e}. "
+                               f"LLM ideas will fall back to parametric grid.")
+            self.monitor.log_event("Daemon", "LLM_STATUS",
+                                   f"Ollama unreachable: {e}", "WARNING")
+            # Try to start Ollama automatically
+            try:
+                import subprocess
+                ollama_path = os.path.join(os.environ.get('LOCALAPPDATA', ''),
+                                           'Programs', 'Ollama', 'ollama.exe')
+                if os.path.exists(ollama_path):
+                    self.logger.info(f"Attempting to start Ollama at {ollama_path}...")
+                    subprocess.Popen([ollama_path, 'serve'],
+                                     creationflags=0x00000008)  # DETACHED_PROCESS
+                    time.sleep(5)
+                    self.logger.info("Ollama start attempted. Will retry on first LLM call.")
+            except Exception as start_err:
+                self.logger.warning(f"Could not auto-start Ollama: {start_err}")
+
     # =========================================================================
     # State Persistence
     # =========================================================================
 
-    def _save_state(self):
-        """Persist daemon state to JSON for crash recovery."""
+    def _save_state(self, force_flags=None):
+        """Persist daemon state to JSON for crash recovery.
+
+        Merges with existing file to preserve dashboard-written control fields.
+        The file is authoritative for paused/stopped — the daemon never overwrites
+        these unless force_flags is provided (used by start/stop methods).
+
+        Args:
+            force_flags: Optional dict of flags to force-write (e.g., {'stopped': True})
+        """
         try:
             os.makedirs(os.path.dirname(self.config.state_file), exist_ok=True)
+            # Read existing state to preserve dashboard-written fields
+            existing = {}
+            if os.path.exists(self.config.state_file):
+                try:
+                    with open(self.config.state_file, 'r') as f:
+                        existing = json.load(f)
+                except (json.JSONDecodeError, IOError):
+                    pass
+            # Only write daemon metrics (not control flags) from self._state
+            daemon_metrics = {k: v for k, v in self._state.items()
+                              if k not in ('paused', 'stopped')}
+            existing.update(daemon_metrics)
+            # Force-write specific flags if requested (start/stop lifecycle)
+            if force_flags:
+                existing.update(force_flags)
             with open(self.config.state_file, 'w') as f:
-                json.dump(self._state, f, indent=2, default=str)
+                json.dump(existing, f, indent=2, default=str)
         except Exception as e:
             self.logger.error(f"State save failed: {e}")
 
@@ -377,7 +562,16 @@ class MarcusDaemon:
                 self._state['last_dashboard_at'] = saved.get('last_dashboard_at')
                 self._state['total_cycles'] = saved.get('total_cycles', 0)
                 self._state['total_errors'] = saved.get('total_errors', 0)
-                self.logger.info(f"Restored state: {self._state['total_cycles']} previous cycles")
+                # Restore dashboard control flags
+                self._state['paused'] = saved.get('paused', False)
+                self._state['stopped'] = saved.get('stopped', False)
+                # Restore dashboard-written config
+                for key in ('exploration_mode', 'active_objective', 'active_preset_id',
+                            'guide_text', 'directive'):
+                    if key in saved:
+                        self._state[key] = saved[key]
+                self.logger.info(f"Restored state: {self._state['total_cycles']} previous cycles, "
+                                 f"paused={self._state['paused']}, stopped={self._state['stopped']}")
         except Exception as e:
             self.logger.warning(f"State restore failed (starting fresh): {e}")
 

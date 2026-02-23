@@ -1,0 +1,173 @@
+//@version=5
+strategy("MARCUS: Lunch Range Fade [C-v1]", overlay=true, pyramiding=0,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     initial_capital=100000, commission_type=strategy.commission.cash_per_order,
+     commission_value=2.06, slippage=1,
+     calc_on_every_tick=false, calc_on_order_fills=false)
+
+// ============================================================================
+// FAMILY C: LUNCH RANGE FADE (CHOP / RANGE-BOUND)
+// ============================================================================
+// Hypothesis: Lunch hours (11:30-13:30 ET) have statistically lower volume
+//   and tighter ranges. Institutional desks are at lunch, retail flow
+//   dominates. Price oscillates around VWAP and tends to revert from
+//   morning session extremes. Fading moves to session high/low boundaries
+//   during this window captures reliable mean-reversion behavior.
+//
+// Complements NQmain: Profits from the EXACT conditions that damage ORB
+//   strategies (low vol, no follow-through, range-bound chop).
+//   Active during NQmain's dead zone.
+//
+// Timeframe: 5-minute ONLY
+// Target: ~1 trade/day (some days no trade if no extension to range edge)
+// Session: 11:30-13:30 ET entry, hard exit 13:35 ET
+// ============================================================================
+
+// === INPUTS ===
+// -- Range Reference --
+int    i_atrLen       = input.int(14, "ATR Period", minval=5, maxval=50, group="Range")
+float  i_rangePad     = input.float(0.25, "Range Padding (ATR mult)", step=0.1, group="Range", tooltip="How close to morning H/L before triggering fade")
+
+// -- Entry Filters --
+int    i_rsiLen       = input.int(14, "RSI Period", minval=5, maxval=30, group="Filters")
+float  i_rsiOB        = input.float(65.0, "RSI Overbought (relaxed for chop)", step=5.0, group="Filters")
+float  i_rsiOS        = input.float(35.0, "RSI Oversold (relaxed for chop)", step=5.0, group="Filters")
+bool   i_useVolFilter = input.bool(true, "Require Below-Avg Volume", group="Filters", tooltip="Confirms low-vol environment for range trading")
+int    i_volLen       = input.int(20, "Volume SMA Length", minval=5, group="Filters")
+float  i_volMaxMult   = input.float(1.2, "Max Volume (mult of avg)", step=0.1, group="Filters", tooltip="Skip if volume is surging - likely breakout, not chop")
+bool   i_useBBWidth   = input.bool(true, "Use BB Width Squeeze Filter", group="Filters")
+int    i_bbLen        = input.int(20, "BB Length", minval=10, group="Filters")
+float  i_bbWidthMax   = input.float(0.02, "BB Width Max (narrow = chop)", step=0.005, group="Filters", tooltip="Bollinger Band width threshold - low values indicate compression/chop")
+
+// -- Risk --
+float  i_slMult       = input.float(1.0, "Stop Loss ATR Mult (beyond range)", step=0.25, group="Risk")
+float  i_tpMult       = input.float(0.75, "Take Profit (fraction of range to VWAP)", step=0.1, group="Risk")
+
+// -- Session --
+string i_tradeSession = input.session("1130-1330", "Trading Entry Window", group="Session")
+int    i_hardExitHHMM = input.int(1335, "Hard Exit Time (HHMM ET)", group="Session")
+
+// -- Direction --
+bool   i_enableLong   = input.bool(true, "Enable Long (fade toward range low)", group="Direction")
+bool   i_enableShort  = input.bool(true, "Enable Short (fade toward range high)", group="Direction")
+
+// === CALCULATIONS ===
+int currentHHMM = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
+bool isNewDay = ta.change(time("D")) != 0
+bool isTradeSession = not na(time(timeframe.period, i_tradeSession + ":1234567", "America/New_York"))
+
+// ATR
+float atrVal = ta.atr(i_atrLen)
+
+// RSI
+float rsiVal = ta.rsi(close, i_rsiLen)
+
+// VWAP
+float vwapVal = ta.vwap(hlc3)
+
+// Volume
+float volSma = ta.sma(volume, i_volLen)
+bool lowVolEnv = not i_useVolFilter or (volume < volSma * i_volMaxMult)
+
+// Bollinger Band Width (squeeze detector)
+float bbBasis = ta.sma(close, i_bbLen)
+float bbDev   = ta.stdev(close, i_bbLen)
+float bbWidth = close > 0 ? (2 * bbDev) / close : 0.0
+bool isSqueezing = not i_useBBWidth or (bbWidth < i_bbWidthMax)
+
+// === MORNING RANGE (9:30-11:30 session high/low) ===
+var float sessionHigh = na
+var float sessionLow  = na
+var bool  tradedToday = false
+
+if isNewDay
+    sessionHigh := na
+    sessionLow  := na
+    tradedToday := false
+
+bool isMorning = currentHHMM >= 930 and currentHHMM < 1130
+if isMorning
+    if na(sessionHigh)
+        sessionHigh := high
+        sessionLow  := low
+    else
+        sessionHigh := math.max(sessionHigh, high)
+        sessionLow  := math.min(sessionLow, low)
+
+// Continue tracking during lunch (range can expand slightly)
+if isTradeSession and not na(sessionHigh)
+    sessionHigh := math.max(sessionHigh, high)
+    sessionLow  := math.min(sessionLow, low)
+
+// === ENTRY LOGIC ===
+// Near session high (fade short) - price approaching resistance
+float upperZone = not na(sessionHigh) ? sessionHigh - atrVal * i_rangePad : na
+float lowerZone = not na(sessionLow) ? sessionLow + atrVal * i_rangePad : na
+
+bool nearSessionHigh = not na(upperZone) and close >= upperZone
+bool nearSessionLow  = not na(lowerZone) and close <= lowerZone
+
+// Full conditions
+bool shortFade = i_enableShort and isTradeSession and not tradedToday and
+     nearSessionHigh and rsiVal >= i_rsiOB and
+     lowVolEnv and isSqueezing and
+     barstate.isconfirmed
+
+bool longFade = i_enableLong and isTradeSession and not tradedToday and
+     nearSessionLow and rsiVal <= i_rsiOS and
+     lowVolEnv and isSqueezing and
+     barstate.isconfirmed
+
+// === EXECUTION ===
+if longFade
+    strategy.entry("Lunch Long", strategy.long)
+    tradedToday := true
+
+if shortFade
+    strategy.entry("Lunch Short", strategy.short)
+    tradedToday := true
+
+// === EXIT LOGIC ===
+// Hard exit
+if currentHHMM >= i_hardExitHHMM and strategy.position_size != 0
+    strategy.close_all("Hard Exit 13:35")
+
+// Stop and target
+if strategy.position_size > 0
+    float entryP = strategy.opentrades.entry_price(strategy.opentrades - 1)
+    float sl = not na(sessionLow) ? sessionLow - atrVal * i_slMult : entryP - atrVal * 2.0
+    // Target: move back toward VWAP
+    float targetDist = math.abs(entryP - vwapVal) * i_tpMult
+    float tp = entryP + math.max(targetDist, atrVal * 0.5)  // Min target of 0.5 ATR
+    strategy.exit("Exit Lunch Long", "Lunch Long", stop=sl, limit=tp)
+
+if strategy.position_size < 0
+    float entryP = strategy.opentrades.entry_price(strategy.opentrades - 1)
+    float sl = not na(sessionHigh) ? sessionHigh + atrVal * i_slMult : entryP + atrVal * 2.0
+    float targetDist = math.abs(entryP - vwapVal) * i_tpMult
+    float tp = entryP - math.max(targetDist, atrVal * 0.5)
+    strategy.exit("Exit Lunch Short", "Lunch Short", stop=sl, limit=tp)
+
+// === VISUALIZATION ===
+plot(vwapVal, "VWAP", color.purple, 2)
+plot(isMorning or isTradeSession ? sessionHigh : na, "Session High", color.red, 2, plot.style_linebr)
+plot(isMorning or isTradeSession ? sessionLow : na, "Session Low", color.green, 2, plot.style_linebr)
+plot(isTradeSession ? upperZone : na, "Upper Fade Zone", color.new(color.red, 60), 1, plot.style_linebr)
+plot(isTradeSession ? lowerZone : na, "Lower Fade Zone", color.new(color.green, 60), 1, plot.style_linebr)
+
+bgcolor(isMorning ? color.new(color.blue, 95) : na, title="Morning Build")
+bgcolor(isTradeSession ? color.new(color.orange, 93) : na, title="Lunch Fade Window")
+
+// Info table
+if barstate.islastconfirmedhistory
+    var table infoT = table.new(position.top_right, 2, 5, bgcolor=color.new(color.gray, 85))
+    table.cell(infoT, 0, 0, "Strategy", text_color=color.white, text_size=size.small)
+    table.cell(infoT, 1, 0, "Lunch Range Fade [C]", text_color=color.yellow, text_size=size.small)
+    table.cell(infoT, 0, 1, "Entry Window", text_color=color.white, text_size=size.small)
+    table.cell(infoT, 1, 1, "11:30-13:30 ET", text_color=color.white, text_size=size.small)
+    table.cell(infoT, 0, 2, "Regime", text_color=color.white, text_size=size.small)
+    table.cell(infoT, 1, 2, "CHOP / RANGE", text_color=color.orange, text_size=size.small)
+    table.cell(infoT, 0, 3, "Max Trades", text_color=color.white, text_size=size.small)
+    table.cell(infoT, 1, 3, "1/day", text_color=color.white, text_size=size.small)
+    table.cell(infoT, 0, 4, "Timeframe", text_color=color.white, text_size=size.small)
+    table.cell(infoT, 1, 4, "5min", text_color=color.aqua, text_size=size.small)

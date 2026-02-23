@@ -477,6 +477,36 @@ class StrategyLifecycleManager:
         finally:
             conn.close()
 
+    def is_already_tested(self, strategy_hash: str) -> bool:
+        """Check if this hash exists in lifecycle (any stage) or graveyard.
+
+        Prevents retesting strategies that already passed or are in progress,
+        not just those that failed (graveyard). This closes the dedup gap where
+        winning strategies were regenerated and retested endlessly.
+        """
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        try:
+            # Check graveyard first (fast, indexed)
+            cursor.execute(
+                "SELECT 1 FROM strategy_graveyard WHERE strategy_hash = ?",
+                (strategy_hash,)
+            )
+            if cursor.fetchone() is not None:
+                return True
+
+            # Check active lifecycle (includes winners, in-progress, archived)
+            cursor.execute(
+                "SELECT 1 FROM strategy_lifecycle WHERE strategy_hash = ? LIMIT 1",
+                (strategy_hash,)
+            )
+            return cursor.fetchone() is not None
+        except Exception as e:
+            logger.error(f"Already-tested check failed: {e}")
+            return False
+        finally:
+            conn.close()
+
     def get_graveyard_count(self) -> int:
         """How many strategies have been permanently killed."""
         conn = self._get_conn()

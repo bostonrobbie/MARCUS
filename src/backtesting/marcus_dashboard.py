@@ -68,6 +68,8 @@ class MarcusDashboard:
             'recent_events': self.monitor.get_recent_events(limit=20),
             'equity_curves': self._get_top_equity_curves(limit=5),
             'research_stats': self._get_research_stats(),
+            'near_misses': self._get_near_misses(limit=10),
+            'archetype_stats': self._get_archetype_stats(),
         }
 
     def _get_daemon_status(self) -> Dict[str, Any]:
@@ -102,11 +104,42 @@ class MarcusDashboard:
         except ImportError:
             gpu_status = "Module unavailable"
 
+        # P1-2: LLM status check
+        llm_status = "Unknown"
+        try:
+            import requests
+            resp = requests.get(f"{self.config.llm_base_url}/api/version", timeout=2)
+            if resp.status_code == 200:
+                llm_status = "Online"
+            else:
+                llm_status = "Offline"
+        except Exception:
+            llm_status = "Offline"
+
+        # P2-3: Session duration
+        session_duration = "Unknown"
+        try:
+            state_file = self.config.state_file
+            if os.path.exists(state_file):
+                with open(state_file, 'r') as f:
+                    state = json.load(f)
+                started = state.get('started_at', '')
+                if started:
+                    start_time = datetime.fromisoformat(started)
+                    elapsed = datetime.now() - start_time
+                    hours = int(elapsed.total_seconds() // 3600)
+                    minutes = int((elapsed.total_seconds() % 3600) // 60)
+                    session_duration = f"{hours}h {minutes}m"
+        except Exception:
+            pass
+
         return {
             'status': status,
             'heartbeat': heartbeat,
             'errors_24h': errors_24h,
             'gpu_status': gpu_status,
+            'llm_status': llm_status,
+            'session_duration': session_duration,
         }
 
     def _get_leaderboard(self) -> List[Dict[str, Any]]:
@@ -199,6 +232,77 @@ class MarcusDashboard:
             'best_sharpe_ever': best_sharpe,
         }
 
+    def _get_near_misses(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get strategies that passed S1 but failed S2 (near misses), ordered by S1 Sharpe."""
+        try:
+            import sqlite3
+            conn = sqlite3.connect(self.config.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    sl.strategy_name,
+                    sl.archetype,
+                    sl.current_stage,
+                    sl.created_at,
+                    br.sharpe_ratio,
+                    br.profit_factor,
+                    br.win_rate,
+                    br.max_drawdown,
+                    br.total_trades,
+                    br.net_profit,
+                    br.regime as failure_stage,
+                    br.notes as failure_reason
+                FROM strategy_lifecycle sl
+                LEFT JOIN backtest_runs br ON br.strategy_name = sl.strategy_name
+                WHERE sl.current_stage IN ('REJECTED', 'DELETED', 'ARCHIVED')
+                  AND br.regime LIKE '%STAGE2%'
+                  AND br.sharpe_ratio IS NOT NULL
+                  AND br.sharpe_ratio > 0
+                ORDER BY br.sharpe_ratio DESC
+                LIMIT ?
+            """, (limit,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Near misses query failed: {e}")
+            return []
+
+    def _get_archetype_stats(self) -> Dict[str, Dict]:
+        """Get per-archetype performance statistics."""
+        try:
+            import sqlite3
+            conn = sqlite3.connect(self.config.db_path)
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    archetype,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN current_stage IN ('STAGE1_PASS','STAGE2_PASS','STAGE3_PASS','STAGE4_PASS','STAGE5_PASS','DEPLOYED') THEN 1 ELSE 0 END) as s1_pass,
+                    SUM(CASE WHEN current_stage IN ('STAGE2_PASS','STAGE3_PASS','STAGE4_PASS','STAGE5_PASS','DEPLOYED') THEN 1 ELSE 0 END) as s2_pass
+                FROM strategy_lifecycle
+                WHERE archetype IS NOT NULL AND archetype != ''
+                GROUP BY archetype
+            """)
+            rows = cursor.fetchall()
+            conn.close()
+
+            stats = {}
+            for row in rows:
+                arch, total, s1, s2 = row
+                if arch:
+                    stats[arch] = {
+                        'total': total or 0,
+                        's1_pass': s1 or 0,
+                        's2_pass': s2 or 0,
+                        'best_sharpe': 0.0,  # Would need a separate query
+                    }
+            return stats
+        except Exception as e:
+            logger.error(f"Archetype stats query failed: {e}")
+            return {}
+
     # =========================================================================
     # HTML Rendering
     # =========================================================================
@@ -220,7 +324,7 @@ class MarcusDashboard:
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta http-equiv="refresh" content="300">
+    <meta http-equiv="refresh" content="30">
     <title>MARCUS - Autonomous Research Agent</title>
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     <style>
@@ -466,8 +570,17 @@ class MarcusDashboard:
             <div class="value">{stats.get('best_sharpe_ever', 0):.2f}</div>
             <div class="label">Best Sharpe</div>
         </div>
+        <div class="header-stat">
+            <div class="value" style="color: {'#00ff41' if status.get('llm_status') == 'Online' else '#ff4444'};">{status.get('llm_status', 'Unknown')}</div>
+            <div class="label">LLM</div>
+        </div>
+        <div class="header-stat">
+            <div class="value">{status.get('session_duration', '?')}</div>
+            <div class="label">Uptime</div>
+        </div>
     </div>
 </div>
+{'<div style="background: #ff444422; border: 1px solid #ff4444; padding: 8px 20px; text-align: center; color: #ff6666; font-size: 13px;">LLM OFFLINE - Running in deterministic fallback mode. Start Ollama to enable AI-driven idea generation.</div>' if status.get('llm_status') != 'Online' else ''}
 
 <div class="grid">
 
@@ -578,6 +691,27 @@ class MarcusDashboard:
         </div>
         <div class="card-body scroll-body">
             {self._render_events(data['recent_events'])}
+        </div>
+    </div>
+
+    <!-- NEAR MISSES -->
+    <div class="card grid-full">
+        <div class="card-header">
+            <h2>Near Misses (S1 Pass, S2 Fail)</h2>
+            <span class="badge">{len(data['near_misses'])} strategies</span>
+        </div>
+        <div class="card-body scroll-body">
+            {self._render_near_misses(data['near_misses'])}
+        </div>
+    </div>
+
+    <!-- ARCHETYPE PERFORMANCE -->
+    <div class="card">
+        <div class="card-header">
+            <h2>Archetype Performance</h2>
+        </div>
+        <div class="card-body scroll-body">
+            {self._render_archetype_stats(data['archetype_stats'])}
         </div>
     </div>
 
@@ -826,6 +960,204 @@ class MarcusDashboard:
         }};
         Plotly.newPlot('equity-chart', data, layout, {{responsive: true, displayModeBar: false}});
         """
+
+    def _render_near_misses(self, near_misses: List[Dict]) -> str:
+        """Render the near misses table."""
+        if not near_misses:
+            return '<div style="color: #555; text-align: center; padding: 20px;">No near misses yet. No strategies have passed S1.</div>'
+
+        html = """<table>
+        <tr>
+            <th>#</th><th>Strategy</th><th>Arch</th>
+            <th class="num">Sharpe</th><th class="num">PF</th>
+            <th class="num">WR%</th><th class="num">DD%</th>
+            <th>S2 Failure Reason</th>
+        </tr>"""
+
+        for i, s in enumerate(near_misses):
+            sharpe = float(s.get('sharpe_ratio', 0) or 0)
+            pf = float(s.get('profit_factor', 0) or 0)
+            wr = float(s.get('win_rate', 0) or 0)
+            dd = abs(float(s.get('max_drawdown', 0) or 0)) * 100
+            name = str(s.get('strategy_name', ''))[:30]
+            arch = str(s.get('archetype', ''))[:12]
+            reason = str(s.get('failure_reason', ''))[:50]
+
+            html += f"""
+            <tr>
+                <td class="muted">{i + 1}</td>
+                <td>{name}</td>
+                <td class="muted">{arch}</td>
+                <td class="num warn">{sharpe:.2f}</td>
+                <td class="num">{pf:.2f}</td>
+                <td class="num">{wr:.1f}</td>
+                <td class="num">{dd:.1f}</td>
+                <td class="muted">{reason}</td>
+            </tr>"""
+
+        html += '</table>'
+        return html
+
+    def _render_archetype_stats(self, archetype_stats: Dict[str, Dict]) -> str:
+        """Render archetype performance table."""
+        if not archetype_stats:
+            return '<div style="color: #555; text-align: center; padding: 20px;">No archetype data yet.</div>'
+
+        html = """<table>
+        <tr>
+            <th>Archetype</th><th class="num">Tested</th>
+            <th class="num">S1 Pass</th><th class="num">S1 Rate</th>
+            <th class="num">S2 Pass</th><th class="num">S2 Rate</th>
+        </tr>"""
+
+        for arch, stats in sorted(archetype_stats.items(), key=lambda x: x[1].get('total', 0), reverse=True):
+            total = stats.get('total', 0)
+            s1 = stats.get('s1_pass', 0)
+            s2 = stats.get('s2_pass', 0)
+            s1_rate = s1 / max(total, 1) * 100
+            s2_rate = s2 / max(total, 1) * 100
+
+            s1_class = 'pass' if s1_rate > 5 else ('warn' if s1_rate > 0 else 'fail')
+            s2_class = 'pass' if s2_rate > 0 else 'fail'
+
+            html += f"""
+            <tr>
+                <td>{arch}</td>
+                <td class="num">{total}</td>
+                <td class="num">{s1}</td>
+                <td class="num {s1_class}">{s1_rate:.1f}%</td>
+                <td class="num">{s2}</td>
+                <td class="num {s2_class}">{s2_rate:.1f}%</td>
+            </tr>"""
+
+        html += '</table>'
+        return html
+
+    # =========================================================================
+    # Session Summary Report (P0-3)
+    # =========================================================================
+
+    def generate_session_summary(self, session_start: str = None):
+        """Generate a human-readable session summary markdown file.
+
+        Called by daemon every 50 cycles and on shutdown.
+        """
+        try:
+            data = self._gather_data()
+            stats = data['research_stats']
+            cycles = data['cycle_history']
+
+            # Get near misses: strategies that passed S1 but failed at S2
+            near_misses = self._get_near_misses(limit=10)
+
+            # Get archetype performance
+            archetype_stats = self._get_archetype_stats()
+
+            # Build summary
+            now = datetime.now()
+            session_start_str = session_start or (cycles[-1].get('started_at', '') if cycles else 'unknown')
+
+            lines = [
+                f"# MARCUS SESSION SUMMARY",
+                f"## {now.strftime('%Y-%m-%d %H:%M')}",
+                f"",
+                f"**Session:** {session_start_str} to {now.strftime('%Y-%m-%d %H:%M')}",
+                f"**Cycles:** {stats['total_cycles']} | **Ideas Tested:** {stats['total_ideas']} | **Backtests:** {stats['total_backtests']}",
+                f"**Avg Cycle Time:** {stats['avg_cycle_seconds']:.0f}s",
+                f"",
+                f"## Pipeline Funnel",
+                f"",
+                f"| Stage | Count | Rate |",
+                f"|-------|-------|------|",
+                f"| Ideas Generated | {stats['total_ideas']} | 100% |",
+                f"| S1 Passed (Basic Profit) | {stats['total_s1_passed']} | {stats['total_s1_passed']/max(stats['total_ideas'],1)*100:.1f}% |",
+                f"| S2 Passed (Gauntlet) | {stats['total_s2_passed']} | {stats['total_s2_passed']/max(stats['total_ideas'],1)*100:.1f}% |",
+                f"| S5 Passed (Final) | {stats['total_s5_passed']} | {stats['total_s5_passed']/max(stats['total_ideas'],1)*100:.1f}% |",
+                f"| Rejected | {stats['total_rejected']} | {stats['total_rejected']/max(stats['total_ideas'],1)*100:.1f}% |",
+                f"| Errors | {stats['total_errors']} | - |",
+                f"",
+            ]
+
+            # Near misses section
+            lines.append("## Top Near Misses (S1 Pass, S2 Fail)")
+            lines.append("")
+            if near_misses:
+                lines.append("| # | Strategy | Archetype | S1 Sharpe | PF | WR% | DD% | S2 Failure Reason |")
+                lines.append("|---|----------|-----------|-----------|-----|-----|-----|-------------------|")
+                for i, nm in enumerate(near_misses):
+                    lines.append(
+                        f"| {i+1} | {nm.get('strategy_name', '?')[:30]} "
+                        f"| {nm.get('archetype', '?')[:12]} "
+                        f"| {float(nm.get('sharpe_ratio', 0) or 0):.2f} "
+                        f"| {float(nm.get('profit_factor', 0) or 0):.2f} "
+                        f"| {float(nm.get('win_rate', 0) or 0):.1f} "
+                        f"| {abs(float(nm.get('max_drawdown', 0) or 0))*100:.1f} "
+                        f"| {str(nm.get('failure_reason', ''))[:40]} |"
+                    )
+            else:
+                lines.append("*No strategies passed S1 this session.*")
+            lines.append("")
+
+            # Archetype performance
+            lines.append("## Archetype Performance")
+            lines.append("")
+            if archetype_stats:
+                lines.append("| Archetype | Tested | S1 Pass | S1 Rate | S2 Pass | Best Sharpe |")
+                lines.append("|-----------|--------|---------|---------|---------|-------------|")
+                for arch, ast in sorted(archetype_stats.items(), key=lambda x: x[1].get('total', 0), reverse=True):
+                    total = ast.get('total', 0)
+                    s1 = ast.get('s1_pass', 0)
+                    s2 = ast.get('s2_pass', 0)
+                    s1_rate = s1 / max(total, 1) * 100
+                    best = ast.get('best_sharpe', 0)
+                    lines.append(f"| {arch[:20]} | {total} | {s1} | {s1_rate:.1f}% | {s2} | {best:.2f} |")
+            else:
+                lines.append("*No archetype data available.*")
+            lines.append("")
+
+            # System status
+            status = data['daemon_status']
+            lines.extend([
+                "## System Status",
+                "",
+                f"- **Daemon:** {status['status']}",
+                f"- **GPU:** {status['gpu_status']}",
+                f"- **Errors (24h):** {status['errors_24h']}",
+                f"- **Best Sharpe Ever:** {stats.get('best_sharpe_ever', 0):.2f}",
+                f"- **Kill Rate:** {stats['kill_rate_pct']:.1f}%",
+                "",
+                "## Recommendations",
+                "",
+            ])
+
+            # Auto-generate recommendations
+            if stats['total_s2_passed'] == 0 and stats['total_ideas'] > 100:
+                lines.append("- No strategies have passed S2 (gauntlet). Consider reviewing S2 thresholds or exploring new strategy archetypes.")
+            if stats['total_s1_passed'] > 0 and stats['total_s2_passed'] == 0:
+                best_nm = near_misses[0] if near_misses else None
+                if best_nm:
+                    lines.append(f"- Best near miss: {best_nm.get('strategy_name', '?')} with S1 Sharpe {float(best_nm.get('sharpe_ratio', 0) or 0):.2f}. Focus research around this parameter region.")
+            if stats['total_errors'] > 10:
+                lines.append(f"- High error count ({stats['total_errors']}). Check LLM connectivity and data integrity.")
+
+            lines.append("")
+            lines.append(f"---")
+            lines.append(f"*Generated by Marcus Autonomous Research Engine at {now.isoformat()}*")
+
+            # Write to file
+            reports_dir = self.config.reports_dir
+            os.makedirs(reports_dir, exist_ok=True)
+            filename = f"session_{now.strftime('%Y%m%d_%H%M%S')}.md"
+            filepath = os.path.join(reports_dir, filename)
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines))
+
+            logger.info(f"Session summary written: {filepath}")
+            return filepath
+
+        except Exception as e:
+            logger.error(f"Session summary generation failed: {e}")
+            return None
 
     # =========================================================================
     # File Output
