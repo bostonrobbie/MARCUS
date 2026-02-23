@@ -48,7 +48,7 @@ class Position:
                     self.avg_price = 0.0
 
 class Portfolio:
-    def __init__(self, bars: DataHandler, events: Queue, initial_capital: float = 100000.0, 
+    def __init__(self, bars: DataHandler, events: Queue, initial_capital: float = 100000.0,
                  instruments: Dict[str, dict] = None):
         """
         instruments: dict of symbol -> {'multiplier': float, 'margin': float}
@@ -56,16 +56,19 @@ class Portfolio:
         self.bars = bars
         self.events = events
         self.initial_capital = initial_capital
-        
+
         # Default config if generic
-        self.instrument_config = instruments if instruments else {} 
-        
+        self.instrument_config = instruments if instruments else {}
+
         self.current_cash = initial_capital
-        self.current_positions: Dict[str, Position] = {} 
-        
+        self.current_positions: Dict[str, Position] = {}
+
         # History
         self.equity_curve: List[Dict] = []
-        self.trade_log: List[Dict] = [] # New: Track every fill/trade
+        self.trade_log: List[Dict] = [] # Track every fill/trade
+
+        # Regime label (set externally by engine/strategy for trade attribution)
+        self.current_regime: str = ""
 
     def _get_multiplier(self, symbol):
         return self.instrument_config.get(symbol, {}).get('multiplier', 1.0)
@@ -161,16 +164,20 @@ class Portfolio:
             self.current_cash -= (cost + event.commission)
         
         # Log Trade
-        self.trade_log.append({
+        trade_entry = {
             'datetime': event.timestamp,
             'symbol': event.symbol,
             'side': event.side.name,
             'quantity': event.quantity,
             'price': event.price,
             'commission': event.commission,
+            'slippage': event.slippage,
             'multiplier': multiplier,
-            'realized_pnl': trade_pnl
-        })
+            'realized_pnl': trade_pnl,
+        }
+        if self.current_regime:
+            trade_entry['regime'] = self.current_regime
+        self.trade_log.append(trade_entry)
 
     def update_timeindex(self):
         """

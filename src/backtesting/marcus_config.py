@@ -29,6 +29,9 @@ class MarcusConfig:
     logs_dir: str = os.path.join(_MARCUS_DIR, "logs")
     state_file: str = os.path.join(_MARCUS_DIR, "marcus_daemon_state.json")
     pine_dir: str = os.path.join(_MARCUS_DIR, "strategies")
+    backup_dir: str = os.path.join(_MARCUS_DIR, "db_backups")
+    backup_interval_hours: int = 24
+    backup_max_copies: int = 7
 
     # === Schedule ===
     cycle_interval_minutes: int = 1          # Continuous research cycles (start next ~30s after previous ends)
@@ -89,7 +92,7 @@ class MarcusConfig:
     max_degradation_strikes: int = 3        # Strikes before forced archive
     delete_stage1_failures: bool = True     # Immediate delete for garbage
     graveyard_retention_days: int = -1      # -1 = keep graveyard hashes forever
-    rejected_cleanup_days: int = 7          # Delete REJECTED data after N days
+    rejected_cleanup_days: int = 30         # Delete REJECTED data after N days
 
     # === LLM (for idea generation, optional) ===
     llm_provider: str = os.environ.get("MARCUS_LLM_PROVIDER", "ollama")
@@ -169,7 +172,7 @@ class MarcusConfig:
     def _ensure_dirs(self):
         """Create all required directories."""
         for d in [self.data_dir, self.reports_dir, self.logs_dir,
-                  self.pine_dir, os.path.dirname(self.dashboard_path)]:
+                  self.pine_dir, self.backup_dir, os.path.dirname(self.dashboard_path)]:
             os.makedirs(d, exist_ok=True)
 
     def get_s2_commission(self) -> float:

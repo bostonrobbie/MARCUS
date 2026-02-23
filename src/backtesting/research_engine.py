@@ -973,6 +973,11 @@ class AutonomousResearchEngine:
             if equity_curve_raw is not None:
                 metrics_out['equity_curve_raw'] = equity_curve_raw
 
+            # Preserve trades summary for archival (backtest_trade_logs)
+            trades_summary = metrics.get('trades_summary')
+            if trades_summary:
+                metrics_out['trades_summary'] = trades_summary
+
             if not passed:
                 reasons = []
                 if net_profit <= self.config.s1_min_profit:
@@ -1604,10 +1609,12 @@ class AutonomousResearchEngine:
 
     @staticmethod
     def _strip_arrays(metrics: Dict) -> Dict:
-        """Strip numpy arrays and pandas Series from metrics dict for JSON-safe serialization.
-        Lifecycle and archive calls serialize to JSON; numpy arrays/Series would bloat the DB."""
+        """Strip numpy arrays, pandas Series, and large lists from metrics dict for JSON-safe serialization.
+        Lifecycle and archive calls serialize to JSON; numpy arrays/Series would bloat the DB.
+        trades_summary is stored separately in backtest_trade_logs."""
         return {k: v for k, v in metrics.items()
-                if not isinstance(v, (np.ndarray, pd.Series, pd.DataFrame))}
+                if not isinstance(v, (np.ndarray, pd.Series, pd.DataFrame))
+                and k != 'trades_summary'}
 
     def _process_idea(self, idea: Dict, result: CycleResult) -> None:
         """Process a single idea through all applicable stages."""
@@ -1642,13 +1649,15 @@ class AutonomousResearchEngine:
         s1_pass, s1_metrics = self._stage1_basic_backtest(idea)
         # Preserve equity_returns for Stage 5 complementarity, but strip for DB calls
         s1_equity_returns = s1_metrics.get('equity_returns')
+        # Preserve trades_summary for backtest_trade_logs (stored separately)
+        s1_trades = s1_metrics.get('trades_summary')
         s1_db = self._strip_arrays(s1_metrics)
 
         if not s1_pass:
             self.lifecycle.reject(lc_id, s1_metrics.get('failure_reason', 'S1 fail'), 'TESTING')
             self.monitor.log_disposal(name, 'STAGE1', s1_metrics.get('failure_reason', ''))
             result.rejected += 1
-            self._archive_run(idea, s1_db, 'STAGE1_FAIL')
+            self._archive_run(idea, s1_db, 'STAGE1_FAIL', trade_log=s1_trades)
             return
 
         self.lifecycle.promote(lc_id, 'STAGE1_PASS', s1_db)
@@ -1672,7 +1681,7 @@ class AutonomousResearchEngine:
             self.lifecycle.reject(lc_id, s2_metrics.get('failure_reason', 'S2 fail'), 'STAGE1_PASS')
             self.monitor.log_disposal(name, 'STAGE2', s2_metrics.get('failure_reason', ''))
             result.rejected += 1
-            self._archive_run(idea, {**s1_db, **s2_db}, 'STAGE2_FAIL')
+            self._archive_run(idea, {**s1_db, **s2_db}, 'STAGE2_FAIL', trade_log=s1_trades)
             return
 
         self.lifecycle.promote(lc_id, 'STAGE2_PASS', s2_db)
@@ -1687,7 +1696,7 @@ class AutonomousResearchEngine:
             self.lifecycle.reject(lc_id, s3_metrics.get('failure_reason', 'S3 fail'), 'STAGE2_PASS')
             self.monitor.log_disposal(name, 'STAGE3', s3_metrics.get('failure_reason', ''))
             result.rejected += 1
-            self._archive_run(idea, {**s1_db, **s2_db, **s3_db}, 'STAGE3_FAIL')
+            self._archive_run(idea, {**s1_db, **s2_db, **s3_db}, 'STAGE3_FAIL', trade_log=s1_trades)
             return
 
         self.lifecycle.promote(lc_id, 'STAGE3_PASS', s3_db)
@@ -1703,7 +1712,7 @@ class AutonomousResearchEngine:
             self.lifecycle.reject(lc_id, s4_metrics.get('failure_reason', 'S4 fail'), 'STAGE3_PASS')
             self.monitor.log_disposal(name, 'STAGE4', s4_metrics.get('failure_reason', ''))
             result.rejected += 1
-            self._archive_run(idea, {**s1_db, **s2_db, **s4_db}, 'STAGE4_FAIL')
+            self._archive_run(idea, {**s1_db, **s2_db, **s4_db}, 'STAGE4_FAIL', trade_log=s1_trades)
             return
 
         self.lifecycle.promote(lc_id, 'STAGE4_PASS', s4_db)
@@ -1719,7 +1728,7 @@ class AutonomousResearchEngine:
             self.lifecycle.reject(lc_id, s5_metrics.get('failure_reason', 'S5 fail'), 'STAGE4_PASS')
             self.monitor.log_disposal(name, 'STAGE5', s5_metrics.get('failure_reason', ''))
             result.rejected += 1
-            self._archive_run(idea, {**s1_db, **s2_db, **s5_db}, 'STAGE5_FAIL')
+            self._archive_run(idea, {**s1_db, **s2_db, **s5_db}, 'STAGE5_FAIL', trade_log=s1_trades)
             return
 
         self.lifecycle.promote(lc_id, 'STAGE5_PASS', {**s1_db, **s2_db, **s5_db})
@@ -1735,7 +1744,7 @@ class AutonomousResearchEngine:
         if not saved:
             # MC VaR95 gate rejected - still log as S5 pass but not saved as winner
             logger.warning(f"MC gate rejected {name} after S5 pass -- too much tail risk")
-            self._archive_run(idea, {**s1_db, **s2_db, **s5_db}, 'MC_REJECTED')
+            self._archive_run(idea, {**s1_db, **s2_db, **s5_db}, 'MC_REJECTED', trade_log=s1_trades)
             return
 
         # Track best (update if S5 winner is better than prior S1 best)
@@ -1749,7 +1758,8 @@ class AutonomousResearchEngine:
     # Helpers
     # =========================================================================
 
-    def _archive_run(self, idea: Dict, metrics: Dict, stage: str):
+    def _archive_run(self, idea: Dict, metrics: Dict, stage: str,
+                     trade_log: list = None):
         """Save a run to the backtest_runs table regardless of pass/fail."""
         try:
             self.registry.save_run(
@@ -1761,6 +1771,7 @@ class AutonomousResearchEngine:
                 data_range=(self.config.backtest_start, self.config.backtest_end),
                 regime=stage,
                 notes=metrics.get('failure_reason', ''),
+                trade_log=trade_log,
             )
         except Exception as e:
             logger.error(f"Archive run failed: {e}")

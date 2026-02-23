@@ -570,6 +570,28 @@ class RigorousBacktester:
         else:
             equity_returns_arr = np.array([])
 
+        # Build per-trade summary for archival (used by backtest_trade_logs)
+        trades_summary = []
+        if signals is not None and returns is not None and total_trades > 0:
+            try:
+                pos = signals.shift(1).fillna(0)
+                tr = returns * pos
+                tb = pos.diff().fillna(0) != 0
+                tid = tb.cumsum()
+                for trade_id, group in tr.groupby(tid):
+                    pnl = float(group.sum())
+                    if pnl == 0.0:
+                        continue
+                    trades_summary.append({
+                        'entry': str(group.index[0]),
+                        'exit': str(group.index[-1]),
+                        'bars': len(group),
+                        'pnl': round(pnl, 4),
+                        'side': 'LONG' if float(pos.iloc[group.index[0]] if group.index[0] in pos.index else 0) > 0 else 'SHORT',
+                    })
+            except Exception:
+                pass  # Non-critical: summary generation failure shouldn't block backtest
+
         return {
             "strategy_name": strategy_name,
             "total_return": total_return,
@@ -587,6 +609,7 @@ class RigorousBacktester:
             "equity_returns": equity_returns_arr,
             # P0-5: Preserve raw equity curve Series for winner persistence
             "equity_curve_raw": equity_curve,
+            "trades_summary": trades_summary,
             "status": "completed",
             "error": None,
         }

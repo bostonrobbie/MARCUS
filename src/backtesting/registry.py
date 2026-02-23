@@ -165,7 +165,7 @@ class StrategyRegistry:
             )
         """)
 
-        # Trade log snapshots
+        # Trade log snapshots (winning strategies)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS trade_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -174,6 +174,18 @@ class StrategyRegistry:
                 total_trades INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (strategy_id) REFERENCES winning_strategies(id)
+            )
+        """)
+
+        # Trade logs for ALL backtest runs (including failures)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS backtest_trade_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                trades_json TEXT NOT NULL,
+                total_trades INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (run_id) REFERENCES backtest_runs(id)
             )
         """)
 
@@ -219,6 +231,7 @@ class StrategyRegistry:
                 reason TEXT,
                 best_sharpe REAL,
                 total_trades INTEGER,
+                metrics_json TEXT,
                 created_at TEXT DEFAULT (datetime('now'))
             )
         """)
@@ -256,6 +269,7 @@ class StrategyRegistry:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_lifecycle_stage ON strategy_lifecycle(current_stage)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_lifecycle_hash ON strategy_lifecycle(strategy_hash)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_graveyard_hash ON strategy_graveyard(strategy_hash)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_bt_trade_logs_run ON backtest_trade_logs(run_id)")
 
         conn.commit()
         conn.close()
@@ -290,6 +304,16 @@ class StrategyRegistry:
                         cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_hash_id ON backtest_runs(hash_id)")
                 except Exception as e:
                     logger.debug(f"Column {col} migration note: {e}")
+
+        # Migrate strategy_graveyard table
+        try:
+            cursor.execute("PRAGMA table_info(strategy_graveyard)")
+            graveyard_cols = {row[1] for row in cursor.fetchall()}
+            if 'metrics_json' not in graveyard_cols:
+                cursor.execute("ALTER TABLE strategy_graveyard ADD COLUMN metrics_json TEXT")
+                logger.info("Migrated strategy_graveyard: added column metrics_json")
+        except Exception as e:
+            logger.debug(f"Graveyard migration note: {e}")
 
         conn.commit()
         conn.close()
@@ -331,7 +355,8 @@ class StrategyRegistry:
     def save_run(self, strategy_name: str, symbol: str, interval: str,
                  params: Dict[str, Any], stats: Dict[str, Any],
                  data_range: tuple, regime: str = "UNKNOWN",
-                 notes: str = "", source_code: str = ""):
+                 notes: str = "", source_code: str = "",
+                 trade_log: List[Dict] = None):
         """Persist a backtest run with full context to the database."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -365,7 +390,13 @@ class StrategyRegistry:
                 _safe_float(stats.get('Net Profit', stats.get('net_profit'))),
             ))
             conn.commit()
+            run_id = cursor.lastrowid
             logger.info(f"Registry: archived {strategy_name}")
+
+            # Save trade log if provided
+            if trade_log and run_id:
+                self._save_backtest_trade_log(cursor, conn, run_id, trade_log)
+
         except sqlite3.IntegrityError:
             logger.debug(f"Duplicate run skipped: {strategy_name}")
         except Exception as e:
@@ -570,6 +601,18 @@ class StrategyRegistry:
             conn.commit()
         except Exception as e:
             logger.warning(f"Could not save trade log: {e}")
+
+    def _save_backtest_trade_log(self, cursor, conn, run_id: int, trade_log: List[Dict]):
+        """Store trade log for a backtest run (pass or fail)."""
+        try:
+            trades_json = json.dumps(trade_log, default=str)
+            cursor.execute(
+                "INSERT INTO backtest_trade_logs (run_id, trades_json, total_trades) VALUES (?, ?, ?)",
+                (run_id, trades_json, len(trade_log))
+            )
+            conn.commit()
+        except Exception as e:
+            logger.warning(f"Could not save backtest trade log: {e}")
 
     # =========================================================================
     # Queries & Leaderboard
@@ -988,3 +1031,64 @@ class StrategyRegistry:
             return 1
         finally:
             conn.close()
+
+    # =========================================================================
+    # Database Backup
+    # =========================================================================
+
+    def backup_database(self, backup_dir: str, max_copies: int = 7) -> Optional[str]:
+        """Create a safe backup of the SQLite database using the backup API.
+
+        Uses sqlite3.Connection.backup() which is safe with WAL mode and
+        doesn't require locking out writers.
+
+        Args:
+            backup_dir: Directory to store backup files.
+            max_copies: Maximum number of backup files to retain.
+
+        Returns:
+            Path to the backup file on success, None on failure.
+        """
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_path = os.path.join(backup_dir, f"marcus_registry_{timestamp}.db")
+
+            source = sqlite3.connect(self.db_path)
+            dest = sqlite3.connect(backup_path)
+            try:
+                source.backup(dest)
+                dest.close()
+                source.close()
+                logger.info(f"Database backup created: {backup_path}")
+            except Exception as e:
+                dest.close()
+                source.close()
+                # Clean up partial backup
+                if os.path.exists(backup_path):
+                    os.remove(backup_path)
+                raise e
+
+            # Rotate old backups
+            self._rotate_backups(backup_dir, max_copies)
+
+            return backup_path
+
+        except Exception as e:
+            logger.error(f"Database backup failed: {e}")
+            return None
+
+    @staticmethod
+    def _rotate_backups(backup_dir: str, max_copies: int):
+        """Remove oldest backups when exceeding max_copies."""
+        try:
+            backups = sorted(
+                [f for f in os.listdir(backup_dir)
+                 if f.startswith('marcus_registry_') and f.endswith('.db')],
+            )
+            while len(backups) > max_copies:
+                oldest = backups.pop(0)
+                os.remove(os.path.join(backup_dir, oldest))
+                logger.info(f"Rotated old backup: {oldest}")
+        except Exception as e:
+            logger.warning(f"Backup rotation failed: {e}")

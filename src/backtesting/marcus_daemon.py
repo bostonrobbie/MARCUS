@@ -111,6 +111,7 @@ class MarcusDaemon:
             'last_cycle_at': None,
             'last_dashboard_at': None,
             'last_heartbeat_at': None,
+            'last_backup_at': None,
             'total_cycles': 0,
             'total_errors': 0,
             'started_at': None,
@@ -212,6 +213,10 @@ class MarcusDaemon:
                 # 3. Heartbeat
                 if self._should_heartbeat(now):
                     self._heartbeat()
+
+                # 4. Database backup
+                if self._should_backup(now):
+                    self._run_backup()
 
                 # P1-2: Check for stale heartbeat (>30 min since last)
                 last_hb = self._state.get('last_heartbeat_at')
@@ -426,6 +431,35 @@ class MarcusDaemon:
         self.monitor.log_heartbeat()
         self._state['last_heartbeat_at'] = datetime.now().isoformat()
 
+    def _should_backup(self, now: datetime) -> bool:
+        """Check if database backup is due."""
+        last = self._state.get('last_backup_at')
+        if last is None:
+            return True
+        try:
+            last_dt = datetime.fromisoformat(last)
+            elapsed_hours = (now - last_dt).total_seconds() / 3600
+            return elapsed_hours >= self.config.backup_interval_hours
+        except (ValueError, TypeError):
+            return True
+
+    def _run_backup(self):
+        """Create a database backup."""
+        try:
+            backup_path = self.engine.registry.backup_database(
+                backup_dir=self.config.backup_dir,
+                max_copies=self.config.backup_max_copies,
+            )
+            if backup_path:
+                self._state['last_backup_at'] = datetime.now().isoformat()
+                self.logger.info(f"Database backup complete: {backup_path}")
+                self.monitor.log_event("Daemon", "DB_BACKUP", f"Backup: {backup_path}", "INFO")
+            else:
+                self.logger.error("Database backup returned None")
+        except Exception as e:
+            self.logger.error(f"Database backup failed: {e}")
+            self.monitor.log_event("Daemon", "DB_BACKUP_FAIL", str(e), "ERROR")
+
     # =========================================================================
     # Startup Checks
     # =========================================================================
@@ -560,6 +594,7 @@ class MarcusDaemon:
                 # Merge saved state (preserving cycle count, last timestamps)
                 self._state['last_cycle_at'] = saved.get('last_cycle_at')
                 self._state['last_dashboard_at'] = saved.get('last_dashboard_at')
+                self._state['last_backup_at'] = saved.get('last_backup_at')
                 self._state['total_cycles'] = saved.get('total_cycles', 0)
                 self._state['total_errors'] = saved.get('total_errors', 0)
                 # Restore dashboard control flags

@@ -179,14 +179,14 @@ class StrategyLifecycleManager:
         cursor = conn.cursor()
         try:
             cursor.execute(
-                "SELECT strategy_hash, strategy_name, s1_metrics_json FROM strategy_lifecycle WHERE id = ?",
+                "SELECT strategy_hash, strategy_name, s1_metrics_json, s2_metrics_json FROM strategy_lifecycle WHERE id = ?",
                 (lifecycle_id,)
             )
             row = cursor.fetchone()
             if not row:
                 return
 
-            strategy_hash, name, s1_json = row
+            strategy_hash, name, s1_json, s2_json = row
             best_sharpe = 0.0
             total_trades = 0
             if s1_json:
@@ -196,6 +196,16 @@ class StrategyLifecycleManager:
                     total_trades = int(m.get('total_trades', 0))
                 except (json.JSONDecodeError, ValueError, TypeError):
                     pass
+
+            # Collect all available stage metrics for graveyard preservation
+            all_metrics = {}
+            for stage_key, stage_json in [('s1', s1_json), ('s2', s2_json)]:
+                if stage_json:
+                    try:
+                        all_metrics[stage_key] = json.loads(stage_json)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+            metrics_for_graveyard = json.dumps(all_metrics, default=str) if all_metrics else None
 
             now = datetime.now().isoformat()
 
@@ -207,7 +217,8 @@ class StrategyLifecycleManager:
             if delete_it:
                 # Send to graveyard and mark as DELETED
                 self._send_to_graveyard(conn, cursor, strategy_hash, name,
-                                        stage, reason, best_sharpe, total_trades)
+                                        stage, reason, best_sharpe, total_trades,
+                                        metrics_json=metrics_for_graveyard)
                 cursor.execute("""
                     UPDATE strategy_lifecycle
                     SET current_stage = 'DELETED', rejection_reason = ?, updated_at = ?
@@ -380,7 +391,31 @@ class StrategyLifecycleManager:
 
             cutoff = (now - timedelta(days=cleanup_days)).isoformat()
 
-            # 1. Clean old DELETED records (graveyard hash already saved)
+            # 1. Enrich graveyard entries with metrics before deleting lifecycle records
+            cursor.execute("""
+                SELECT sl.strategy_hash, sl.s1_metrics_json, sl.s2_metrics_json
+                FROM strategy_lifecycle sl
+                WHERE sl.current_stage = 'DELETED' AND sl.updated_at < ?
+            """, (cutoff,))
+            for row in cursor.fetchall():
+                strat_hash, s1_json, s2_json = row
+                metrics = {}
+                for key, val in [('s1', s1_json), ('s2', s2_json)]:
+                    if val:
+                        try:
+                            metrics[key] = json.loads(val)
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                if metrics:
+                    try:
+                        cursor.execute("""
+                            UPDATE strategy_graveyard SET metrics_json = ?
+                            WHERE strategy_hash = ? AND metrics_json IS NULL
+                        """, (json.dumps(metrics, default=str), strat_hash))
+                    except Exception:
+                        pass
+
+            # Clean old DELETED records (graveyard hash already saved)
             cursor.execute("""
                 DELETE FROM strategy_lifecycle
                 WHERE current_stage = 'DELETED' AND updated_at < ?
@@ -447,16 +482,21 @@ class StrategyLifecycleManager:
     def _send_to_graveyard(self, conn, cursor, strategy_hash: str,
                            strategy_name: str, killed_at_stage: str,
                            reason: str, best_sharpe: float = 0.0,
-                           total_trades: int = 0) -> None:
-        """Save strategy hash to graveyard to prevent re-testing."""
+                           total_trades: int = 0,
+                           metrics_json: str = None) -> None:
+        """Save strategy hash to graveyard to prevent re-testing.
+
+        Also preserves key metrics so failed strategies can be analyzed
+        even after their lifecycle records are cleaned up.
+        """
         try:
             cursor.execute("""
                 INSERT OR IGNORE INTO strategy_graveyard
                     (strategy_hash, strategy_name, killed_at_stage, reason,
-                     best_sharpe, total_trades)
-                VALUES (?, ?, ?, ?, ?, ?)
+                     best_sharpe, total_trades, metrics_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (strategy_hash, strategy_name, killed_at_stage, reason,
-                  best_sharpe, total_trades))
+                  best_sharpe, total_trades, metrics_json))
             # Don't commit here - caller handles transaction
         except Exception as e:
             logger.error(f"Graveyard insert failed: {e}")
