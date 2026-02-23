@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 from backtesting.data import SmartDataHandler
 from backtesting.optimizer import VectorizedGridSearch
-from examples.nqorb_15m import NqOrb15m
+from strategies.nqorb_15m import NqOrb15m
 from backtesting.vector_engine import VectorizedNQORB
 
 def run_experiment(name, param_grid, start_date, end_date, symbol, baseline_sharpe=None):

@@ -1,10 +1,10 @@
 import time
 from runner import run_strategy, run_vector_strategy
-from examples.trend_following import MovingAverageCrossover
+from strategies.trend_following import MovingAverageCrossover
 
 def run_benchmark():
     symbol_list = ['NVDA']
-    data_dirs = ['./examples']
+    data_dirs = ['./strategies']
     params = {'short_window': 20, 'long_window': 50}
     interval = '1m'
     

@@ -7,7 +7,7 @@ import numpy as np
 # Add project root to path
 sys.path.append(os.getcwd())
 
-from examples.nqorb_enhanced import NqOrbEnhanced
+from strategies.nqorb_enhanced import NqOrbEnhanced
 from backtesting.vector_engine import VectorizedNQORB, VectorEngine
 from backtesting.data import SmartDataHandler
 

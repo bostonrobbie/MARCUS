@@ -3,7 +3,7 @@ import sys
 import os
 from backtesting.optimizer import VectorizedGridSearch
 from backtesting.data import SmartDataHandler
-from examples.nqorb_enhanced import NqOrbEnhanced
+from strategies.nqorb_enhanced import NqOrbEnhanced
 from backtesting.vector_engine import VectorizedNQORB
 
 def run_tf_scan(interval, param_grid):

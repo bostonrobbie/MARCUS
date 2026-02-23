@@ -11,7 +11,7 @@ import sys
 import os
 
 # Add project paths
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'StrategyPipeline', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 from backtesting.type_utils import (
     ensure_pandas_series,

@@ -165,6 +165,27 @@ class PipelineMonitor:
         return count
 
 
+class SignalMonitor:
+    """
+    Real-time signal monitor stub.
+    Not yet implemented — exists to prevent ImportError in runner.py.
+    """
+    def __init__(self, strategy_cls=None, symbol_list=None, interval_sec=60,
+                 data_dirs=None, interval='15m', **kwargs):
+        self.strategy_cls = strategy_cls
+        self.symbol_list = symbol_list or []
+        self.interval_sec = interval_sec
+        self.data_dirs = data_dirs or []
+        self.interval = interval
+        self.params = kwargs
+
+    def start(self):
+        raise NotImplementedError(
+            "SignalMonitor is not yet implemented. "
+            "Use the backtesting pipeline for signal analysis."
+        )
+
+
 if __name__ == "__main__":
     monitor = PipelineMonitor()
     monitor.log_event("Test", "INIT", "System initializing...")

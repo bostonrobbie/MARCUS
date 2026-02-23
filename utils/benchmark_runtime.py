@@ -3,7 +3,7 @@ import pandas as pd
 from backtesting.optimizer import VectorizedGridSearch
 from backtesting.data import SmartDataHandler
 from backtesting.vector_engine import VectorizedNQORB
-from examples.nqorb_15m import NqOrb15m
+from strategies.nqorb_15m import NqOrb15m
 from backtesting.portfolio import Portfolio
 from backtesting.engine import BacktestEngine
 from backtesting.execution import SimulatedExecutionHandler, FixedCommission

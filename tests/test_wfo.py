@@ -5,15 +5,15 @@ sys.path.append(os.getcwd())
 
 from backtesting.optimizer import WalkForwardOptimizer
 from backtesting.registry import StrategyRegistry
-from examples.nqorb_enhanced import NqOrbEnhanced
-from examples.nqorb_15m import NqOrb15m
+from strategies.nqorb_enhanced import NqOrbEnhanced
+from strategies.nqorb_15m import NqOrb15m
 
 def test_wfo_engine():
     print("Testing Walk-Forward Optimizer (Tooling Check)...")
     
     # 1. Setup
     symbol_list = ['NQ']
-    search_dirs = [os.path.join(os.getcwd(), 'examples')]
+    search_dirs = [os.path.join(os.getcwd(), 'strategies')]
     
     # Simple Grid
     param_grid = {
