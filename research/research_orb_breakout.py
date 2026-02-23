@@ -131,6 +131,7 @@ class OrbBacktester:
         
         # Pre-calc Ranges (Copy logic from before or assume it's clean)
         ranges = {}
+        dates = []
         for date, day_data in grouped:
             if len(day_data) < 10: continue
             open_time = day_data.index[0].replace(hour=9, minute=30)
